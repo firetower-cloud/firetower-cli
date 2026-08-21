@@ -142,6 +142,24 @@ To catch it before pushing:
 echo "feat(install): …" | pnpm commitlint
 ```
 
+## Releasing
+
+One secret, once: **`NPM_TOKEN`** — a granular npm automation token scoped to
+publish `@firetower/cli` and nothing else. Settings → Secrets and variables →
+Actions.
+
+Nothing else is needed. release-please uses the built-in `GITHUB_TOKEN`, and the
+workflow already declares the permissions it wants. One repository setting does
+have to be on, though, or release-please fails opening its pull request with an
+error that does not say so: Settings → Actions → General → **Allow GitHub
+Actions to create and approve pull requests**.
+
+Once `0.1.0` is on the registry the token can go away — npm trusted publishing
+signs over OIDC with no stored credential, and the publish job already requests
+the `id-token: write` it needs. It cannot be set up before then: a trusted
+publisher is configured on the package's own settings page, and that page does
+not exist until the package does.
+
 ## Development
 
 ```sh

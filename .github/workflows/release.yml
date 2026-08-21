@@ -19,9 +19,24 @@
 # out of step with the bump. Cargo.lock does, which is what release-lockfile.yml
 # is for over there.
 #
-# Publishing is over OIDC — npm trusted publishing — so there is no token in
-# this repository to rotate or leak. Register this file at
-# npmjs.com → @firetower/cli → Settings → Trusted publisher.
+# Publishing needs an NPM_TOKEN secret — a granular automation token, scoped to
+# publish @firetower/cli and nothing else.
+#
+# It can be removed later. npm trusted publishing signs over OIDC with no stored
+# credential at all, and this job already requests the `id-token: write` it
+# needs. The catch is that a trusted publisher is configured on the package's
+# own settings page, which does not exist until the package has been published
+# once — so the token is how a package gets off the ground, not how it stays
+# there.
+#
+# To switch, once 0.1.0 is on the registry:
+#
+#   1. npmjs.com → @firetower/cli → Settings → Trusted publisher
+#      → this repository, workflow `release.yml`
+#   2. delete the NODE_AUTH_TOKEN line below
+#   3. delete the NPM_TOKEN secret
+#
+# `--provenance` works either way: it wants `id-token: write`, not OIDC auth.
 name: release
 
 on:
@@ -66,4 +81,10 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+
+      # setup-node above writes an .npmrc pointing at NODE_AUTH_TOKEN. Setting
+      # the secret is not enough on its own — without this line npm reads an
+      # empty token and the publish fails as unauthenticated.
       - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
