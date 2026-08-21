@@ -16,11 +16,17 @@ on:
 
 jobs:
   conventional:
+    # Every branch but release-please's own. Its title is written by
+    # release-please — `chore(main): release 0.2.0` — and `main` is not one of
+    # the scopes below, so linting it would block the one pull request that has
+    # to be mergeable. The main repository skips its own release branch in
+    # release-lockfile.yml for the same reason.
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # release-please's own pull requests are written by release-please.
+          # commitlint walks the range between base and head.
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v4

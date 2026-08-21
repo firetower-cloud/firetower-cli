@@ -13,10 +13,17 @@ export default {
   rules: {
     // The scopes worth having, and no others — a free-for-all makes the
     // changelog harder to skim than no scopes at all.
+    //
+    // `main` is release-please's, from `chore(main): release 0.2.0`. Its
+    // branch is skipped in CI, and it is listed here so that running
+    // commitlint by hand over a range that includes a release does not fail.
     "scope-enum": [
       2,
       "always",
-      ["install", "upgrade", "worker", "doctor", "status", "backup", "env", "ci", "deps"],
+      [
+        "install", "upgrade", "worker", "doctor", "status", "backup",
+        "env", "ci", "deps", "main",
+      ],
     ],
     // Long enough to say what changed, short enough to read in `git log --oneline`.
     "header-max-length": [2, "always", 72],
