@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Never let a real deployment's secrets near this repo.
+.env
+firetower-root-key.txt

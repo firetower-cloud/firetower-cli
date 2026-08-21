@@ -1,0 +1,59 @@
+{
+  "name": "@firetower/cli",
+  "version": "0.1.0",
+  "description": "Install, upgrade and inspect a Firetower deployment.",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://usefiretower.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/firetower-cloud/firetower-cli.git"
+  },
+  "bugs": "https://github.com/firetower-cloud/firetower-cli/issues",
+  "keywords": [
+    "firetower",
+    "cli",
+    "install",
+    "docker",
+    "agents"
+  ],
+  "type": "module",
+  "bin": {
+    "firetower": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "fallback",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.11.0",
+    "commander": "^14.0.1",
+    "execa": "^9.6.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/node": "^24.9.1",
+    "eslint": "^9.39.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  }
+}

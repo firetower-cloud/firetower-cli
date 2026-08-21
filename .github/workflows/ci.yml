@@ -1,0 +1,31 @@
+# Every pull request, and main.
+#
+# The unit tests are the fast half. `test:e2e` drives a real daemon: it
+# installs into a throwaway directory, waits for the stack, and asserts that a
+# second install leaves the root key alone — the one bug in this CLI that
+# loses data rather than merely failing.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      - run: pnpm build
+      - run: pnpm test:e2e

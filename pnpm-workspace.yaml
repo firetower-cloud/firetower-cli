@@ -1,0 +1,6 @@
+# pnpm blocks dependency install scripts by default. Approving them here means
+# the decision is reviewed and in version control, rather than re-prompted on
+# every clone.
+allowBuilds:
+  # the bundler vitest runs on
+  esbuild: true
