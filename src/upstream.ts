@@ -33,7 +33,7 @@ interface Release {
   tag_name: string;
 }
 
-async function latestTag(signal: AbortSignal): Promise<string> {
+export async function latestTag(signal?: AbortSignal): Promise<string> {
   const response = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
     headers: { accept: "application/vnd.github+json" },
     signal,
@@ -129,4 +129,43 @@ export function withAcmeEmail(caddyfile: string, email: string | null): string {
 export function postgresMajor(compose: string): number | null {
   const match = /image:\s*postgres:(\d+)/.exec(compose);
   return match?.[1] ? Number(match[1]) : null;
+}
+
+/**
+ * What the current release demands of this CLI.
+ *
+ * Lives at `deploy/cli.json` in the main repository, so the repository that
+ * makes a breaking change is the one that declares it:
+ *
+ *     { "minimumCli": "0.5.0", "reason": "the compose file now needs …" }
+ *
+ * Absent — which it is today — means no requirement. That has to stay true:
+ * every release before the file existed must keep working, and a CLI that
+ * treated a 404 as a failure would refuse to install perfectly good versions.
+ */
+export interface Requirements {
+  minimumCli?: string;
+  reason?: string;
+}
+
+export async function requirements(): Promise<Requirements | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const tag = await latestTag(controller.signal);
+      const url = `https://raw.githubusercontent.com/${REPO}/${tag}/deploy/cli.json`;
+      const response = await fetch(url, { signal: controller.signal });
+
+      // 404 is the normal answer until the main repository adds the file.
+      if (!response.ok) return null;
+
+      return (await response.json()) as Requirements;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
 }

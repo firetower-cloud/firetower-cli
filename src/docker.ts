@@ -183,8 +183,11 @@ export async function waitForHealthy(
 }
 
 /** What the running control plane says its version is. */
-export async function deployedVersion(options: ComposeOptions): Promise<string | null> {
-  const result = await compose(options, "exec", "-T", "firetower", "firetower", "--version");
+export async function deployedVersion(
+  options: ComposeOptions,
+  service = "firetower",
+): Promise<string | null> {
+  const result = await compose(options, "exec", "-T", service, "firetower", "--version");
   if (result.exitCode !== 0) return null;
 
   // clap prints `firetower 0.4.0`.

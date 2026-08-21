@@ -81,6 +81,67 @@ into the data directory at initdb.
 `src/env.ts` reads first and fills only what is absent. There are unit tests for
 it and an end-to-end test that installs twice and asserts the key survived.
 
+## Staying current
+
+`install`, `upgrade` and the `worker` commands ask two questions before they
+touch anything: whether npm has a newer CLI, and whether the current Firetower
+release *requires* one.
+
+The second is the one with teeth. A release that changes what a deployment needs
+declares it in `deploy/cli.json` in the main repository:
+
+```json
+{ "minimumCli": "0.5.0", "reason": "the compose file now needs FIRETOWER_X" }
+```
+
+A CLI below that minimum refuses to go on and offers to upgrade itself, because
+an old CLI does not fail cleanly — it writes a `.env` missing a variable Compose
+now requires, or waits on a service that has been renamed, and the error the
+operator reads is about neither. A newer version merely existing on npm is a
+note, not a block.
+
+The file is absent today and that is a supported answer: no requirement. Being
+unable to reach npm or GitHub is also not a block — offline is not a reason to
+refuse to work. `--skip-version-check` opts out entirely.
+
+## Versioning
+
+Independent semver, starting at `0.1.0`. It tracks this CLI, not Firetower —
+the two were coupled only while the CLI pinned image tags, and it uses `:latest`.
+
+[release-please](https://github.com/googleapis/release-please) reads the commit
+messages on `main` and keeps one open pull request — *chore(main): release
+0.2.0* — carrying the version bump and the changelog entry. Nothing publishes
+until that pull request is merged; merging it tags, and the tag triggers
+`npm publish`. So cutting a release stays a review rather than a side effect of
+merging a feature.
+
+Below 1.0, `bump-minor-pre-major` keeps a breaking change on the minor.
+
+## Commits
+
+Conventional commits, enforced in CI. This is not a style rule: the messages are
+the input to versioning, and one that says neither `feat:` nor `fix:` produces a
+release that bumps nothing and explains nothing.
+
+```
+feat(install): preflight the machine before writing anything
+fix(upgrade): read the database name from the compose file
+```
+
+Scopes: `install`, `upgrade`, `worker`, `doctor`, `status`, `backup`, `env`,
+`ci`, `deps`. Headers stay under 72 characters.
+
+CI checks the pull request **title** as well as the commits, and the title
+matters more — a squash merge throws the commits away and keeps the title, which
+is then the only thing release-please ever sees.
+
+To catch it before pushing:
+
+```sh
+echo "feat(install): …" | pnpm commitlint
+```
+
 ## Development
 
 ```sh

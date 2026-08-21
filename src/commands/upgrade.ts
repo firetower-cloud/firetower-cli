@@ -6,6 +6,7 @@ import * as hosts from "../hosts.js";
 import * as upstream from "../upstream.js";
 import { compare } from "../version.js";
 import { requireDeployment } from "./shared.js";
+import { open as openDeployment, missingVariables } from "../deployment.js";
 import { ui, pc } from "../ui.js";
 
 export interface UpgradeOptions {
@@ -19,30 +20,45 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
 
   ui.title("Firetower");
 
-  const before = await docker.deployedVersion({ dir });
+  const deployment = await openDeployment(dir);
+  const control = deployment.services.control;
+
+  const before = await docker.deployedVersion({ dir }, control);
   ui.dim(`installed   ${before ?? "unknown"}   ${dir}`);
   ui.dim("images      :latest");
   ui.blank();
 
   // The fleet, before anything moves. A host that is already unreachable is
   // worth knowing about now rather than blaming on the upgrade afterwards.
-  const fleetBefore = await hosts.list({ dir });
+  const fleetBefore = await hosts.list({ dir }, control);
 
   await refreshComposeFile(dir, options);
-  await backUp(dir, options);
+  await backUp(deployment, options);
+
+  const reopened = await openDeployment(dir);
+  const missing = missingVariables(reopened.compose, reopened.env);
+  if (missing.length > 0) {
+    ui.blank();
+    ui.fail(
+      `this release needs ${missing.join(", ")}, which is not in your .env`,
+      "upgrade the CLI: npm i -g @firetower/cli@latest",
+    );
+    ui.blank();
+    process.exit(1);
+  }
 
   ui.blank();
   ui.step("Upgrading the control plane");
   await docker.composeOrThrow({ dir, stream: true }, "pull");
   await docker.composeOrThrow({ dir }, "up", "-d");
-  await docker.waitForHealthy({ dir }, "firetower");
+  await docker.waitForHealthy({ dir }, control);
   ui.ok("healthy");
 
-  const after = await docker.deployedVersion({ dir });
+  const after = await docker.deployedVersion({ dir }, control);
   ui.blank();
   ui.step(pc.bold(`Firetower is on ${after ?? "the latest release"}.`));
 
-  await reportWorkers(dir, after, fleetBefore, options);
+  await reportWorkers(dir, control, after, fleetBefore, options);
 }
 
 /**
@@ -98,7 +114,11 @@ async function refreshComposeFile(dir: string, options: UpgradeOptions): Promise
  * Offered first and defaulted to yes: migrations run on start and there is no
  * down path.
  */
-async function backUp(dir: string, options: UpgradeOptions): Promise<void> {
+async function backUp(
+  deployment: Awaited<ReturnType<typeof openDeployment>>,
+  options: UpgradeOptions,
+): Promise<void> {
+  const { dir } = deployment;
   if (options.backup === false) return;
 
   if (!options.yes && options.backup !== true) {
@@ -112,9 +132,13 @@ async function backUp(dir: string, options: UpgradeOptions): Promise<void> {
   await mkdir(directory, { recursive: true });
 
   const path = join(directory, `${stamp}.sql`);
+  // `pg_dump -U firetower firetower` was hardcoded. Both come from the compose
+  // file's ${POSTGRES_USER:-…} and ${POSTGRES_DB:-…}, so a changed default
+  // upstream would have failed exactly the backup that matters most.
   const result = await docker.compose(
     { dir },
-    "exec", "-T", "postgres", "pg_dump", "-U", "firetower", "firetower",
+    "exec", "-T", deployment.services.database,
+    "pg_dump", "-U", deployment.database.user, deployment.database.database,
   );
 
   if (result.exitCode !== 0) {
@@ -151,11 +175,12 @@ async function backUp(dir: string, options: UpgradeOptions): Promise<void> {
  */
 async function reportWorkers(
   dir: string,
+  control: string,
   version: string | null,
   before: hosts.Host[] | null,
   options: UpgradeOptions,
 ): Promise<void> {
-  const fleet = (await hosts.list({ dir })) ?? before;
+  const fleet = (await hosts.list({ dir }, control)) ?? before;
 
   if (!fleet) {
     ui.notice([

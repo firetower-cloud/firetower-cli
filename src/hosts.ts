@@ -41,8 +41,11 @@ export interface Host {
  * is a normal thing to meet, and failing an upgrade over it would be worse than
  * the vaguer message it costs.
  */
-export async function list(options: ComposeOptions): Promise<Host[] | null> {
-  const result = await compose(options, "exec", "-T", "firetower", "firetower", "hosts", "--json");
+export async function list(
+  options: ComposeOptions,
+  service = "firetower",
+): Promise<Host[] | null> {
+  const result = await compose(options, "exec", "-T", service, "firetower", "hosts", "--json");
   if (result.exitCode !== 0) return null;
 
   try {

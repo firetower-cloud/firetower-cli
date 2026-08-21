@@ -3,6 +3,7 @@ import { join } from "node:path";
 import * as prompts from "@clack/prompts";
 import * as docker from "../docker.js";
 import { requireDeployment } from "./shared.js";
+import { open as openDeployment } from "../deployment.js";
 import { ui } from "../ui.js";
 
 export interface DirOptions {
@@ -19,10 +20,11 @@ export async function logs(options: DirOptions & { follow?: boolean; service?: s
 
 export async function start(options: DirOptions): Promise<void> {
   const dir = await requireDeployment(options.dir);
+  const { services } = await openDeployment(dir);
   ui.title("Firetower");
 
   await docker.composeOrThrow({ dir }, "up", "-d");
-  await docker.waitForHealthy({ dir }, "firetower");
+  await docker.waitForHealthy({ dir }, services.control);
 
   ui.ok("running");
   ui.blank();
@@ -43,10 +45,11 @@ export async function stop(options: DirOptions): Promise<void> {
 
 export async function restart(options: DirOptions): Promise<void> {
   const dir = await requireDeployment(options.dir);
+  const { services } = await openDeployment(dir);
   ui.title("Firetower");
 
   await docker.composeOrThrow({ dir }, "restart");
-  await docker.waitForHealthy({ dir }, "firetower");
+  await docker.waitForHealthy({ dir }, services.control);
 
   ui.ok("running");
   ui.blank();
@@ -54,6 +57,7 @@ export async function restart(options: DirOptions): Promise<void> {
 
 export async function backup(options: DirOptions & { out?: string }): Promise<void> {
   const dir = await requireDeployment(options.dir);
+  const deployment = await openDeployment(dir);
   const directory = options.out ?? join(dir, "backups");
 
   ui.title("Firetower");
@@ -62,7 +66,8 @@ export async function backup(options: DirOptions & { out?: string }): Promise<vo
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const result = await docker.compose(
     { dir },
-    "exec", "-T", "postgres", "pg_dump", "-U", "firetower", "firetower",
+    "exec", "-T", deployment.services.database,
+    "pg_dump", "-U", deployment.database.user, deployment.database.database,
   );
 
   if (result.exitCode !== 0) {

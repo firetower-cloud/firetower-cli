@@ -3,6 +3,7 @@ import { Command, Option } from "commander";
 import * as docker from "./docker.js";
 import { findDeployment } from "./config.js";
 import { cliVersion } from "./version.js";
+import { gate } from "./selfcheck.js";
 import { install } from "./commands/install.js";
 import { upgrade } from "./commands/upgrade.js";
 import { status } from "./commands/status.js";
@@ -21,6 +22,7 @@ program
   )
   .option("--json", "machine-readable output on stdout")
   .option("-y, --yes", "take the defaults and ask nothing")
+  .option("--skip-version-check", "do not ask whether this CLI is current")
   .helpOption("-h, --help", "show this")
   .addHelpText(
     "after",
@@ -29,7 +31,23 @@ Docs: https://usefiretower.com/docs`,
   );
 
 /** Global flags belong to the program, not to each subcommand. */
-const globals = () => program.opts<{ dir?: string; json?: boolean; yes?: boolean }>();
+const globals = () =>
+  program.opts<{
+    dir?: string;
+    json?: boolean;
+    yes?: boolean;
+    skipVersionCheck?: boolean;
+  }>();
+
+/**
+ * Before anything that writes or upgrades a deployment.
+ *
+ * Not before `status`, `logs` or `doctor`: those answer questions about what is
+ * already there, and an old CLI reading a deployment is a far smaller problem
+ * than an old CLI writing one.
+ */
+const checkVersion = () =>
+  gate({ yes: globals().yes, skip: globals().skipVersionCheck });
 
 program
   .command("install")
@@ -38,6 +56,7 @@ program
   .option("--admin-username <name>", "the first administrator", "admin")
   .option("--acme-email <email>", "where Let's Encrypt sends renewal warnings")
   .action(async (options) => {
+    await checkVersion();
     const { dir, yes } = globals();
     await install({
       dir,
@@ -53,6 +72,7 @@ program
   .description("upgrade the control plane, then report which workers lag")
   .option("--no-backup", "skip the database backup")
   .action(async (options) => {
+    await checkVersion();
     const { dir, yes } = globals();
     await upgrade({ dir, yes, backup: options.backup });
   });
@@ -110,15 +130,19 @@ workers
   .command("install")
   .description("install a worker on this machine")
   .option("--container <name>", "what to call it", "firetower-worker")
-  .action(async (options) => worker.install({ container: options.container }));
+  .action(async (options) => {
+    await checkVersion();
+    await worker.install({ container: options.container });
+  });
 
 workers
   .command("upgrade")
   .description("upgrade this machine's worker, once its host is drained")
   .option("--container <name>", "which container", "firetower-worker")
-  .action(async (options) =>
-    worker.upgrade({ container: options.container, yes: globals().yes }),
-  );
+  .action(async (options) => {
+    await checkVersion();
+    await worker.upgrade({ container: options.container, yes: globals().yes });
+  });
 
 workers
   .command("status")

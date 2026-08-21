@@ -1,8 +1,23 @@
 # Version, tag, publish.
 #
-# release-please opens a pull request as commits land and cuts the tag when it
-# is merged. The publish job is gated on that, so a merge that is not a release
-# does nothing here.
+# release-please accumulates what lands on main into one open pull request —
+# "chore(main): release 0.2.0" — carrying the version bump and the changelog
+# entry it worked out from the commit messages. Nothing is released until
+# somebody merges it, so the decision to cut a version stays a review rather
+# than a side effect of merging a feature.
+#
+# Merging it tags, and the tag gates the publish below. A merge that is not
+# that pull request does nothing here.
+#
+# The version is this CLI's own, not Firetower's. They were tied together while
+# the CLI pinned image tags; it uses `:latest`, so a CLI release means the CLI
+# changed and nothing else. `bump-minor-pre-major` keeps a breaking change on
+# the minor while this is below 1.0.
+#
+# Unlike the main repository there is no lockfile to refresh: pnpm-lock.yaml
+# records dependency versions, never the root package's own, so nothing goes
+# out of step with the bump. Cargo.lock does, which is what release-lockfile.yml
+# is for over there.
 #
 # Publishing is over OIDC — npm trusted publishing — so there is no token in
 # this repository to rotate or leak. Register this file at

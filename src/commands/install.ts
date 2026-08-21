@@ -8,6 +8,8 @@ import { machineChecks } from "../checks/machine.js";
 import { runChecks, worst } from "../checks/index.js";
 import { defaultInstallDir, rememberDir } from "../config.js";
 import { invent } from "../password.js";
+import * as services from "../services.js";
+import { missingVariables } from "../deployment.js";
 import { ui, pc } from "../ui.js";
 
 export interface InstallOptions {
@@ -105,13 +107,26 @@ export async function install(options: InstallOptions): Promise<void> {
   ui.dim(`root key      generated, written to ${join(directory, ".env")}`);
   ui.blank();
 
+  // Compose refuses to start without these, with an error naming a variable
+  // the operator has never heard of. Say it properly instead.
+  const missing = missingVariables(files.compose, values);
+  if (missing.length > 0) {
+    ui.blank();
+    ui.fail(
+      `this release needs ${missing.join(", ")}, which this CLI does not write`,
+      "upgrade the CLI: npm i -g @firetower/cli@latest",
+    );
+    ui.blank();
+    process.exit(1);
+  }
+
   if (!options.yes) {
     const proceed = await prompts.confirm({ message: "Continue?" });
     if (cancelled(proceed) || !proceed) stop("Nothing was written.");
   }
 
   await write(directory, files, values, options.acmeEmail ?? null);
-  await start(directory);
+  await start(directory, files.compose);
   await backUpTheKey(secrets.FIRETOWER_ROOT_KEY, directory, options);
   await rememberDir(directory);
 
@@ -230,20 +245,25 @@ async function write(
   }
 }
 
-async function start(directory: string): Promise<void> {
+async function start(directory: string, compose: string): Promise<void> {
   ui.blank();
   ui.step("Starting");
+
+  // Which services these are is read from the file, not assumed. A release
+  // that renames one would otherwise leave the wait below spinning for three
+  // minutes against a stack that came up perfectly.
+  const named = services.resolve(compose);
 
   await docker.composeOrThrow({ dir: directory, stream: true }, "pull");
   await docker.composeOrThrow({ dir: directory }, "up", "-d");
 
-  await docker.waitForHealthy({ dir: directory }, "postgres");
-  ui.ok("postgres healthy");
+  await docker.waitForHealthy({ dir: directory }, named.database);
+  ui.ok(`${named.database} healthy`);
 
-  await docker.waitForHealthy({ dir: directory }, "firetower");
-  ui.ok("firetower healthy");
+  await docker.waitForHealthy({ dir: directory }, named.control);
+  ui.ok(`${named.control} healthy`);
 
-  const version = await docker.deployedVersion({ dir: directory });
+  const version = await docker.deployedVersion({ dir: directory }, named.control);
   if (version) ui.ok("version", version);
 }
 

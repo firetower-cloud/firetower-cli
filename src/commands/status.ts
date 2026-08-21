@@ -2,6 +2,7 @@ import * as docker from "../docker.js";
 import * as hosts from "../hosts.js";
 import { compare } from "../version.js";
 import { requireDeployment } from "./shared.js";
+import { open as openDeployment } from "../deployment.js";
 import { ui, pc } from "../ui.js";
 
 export interface StatusOptions {
@@ -11,11 +12,12 @@ export interface StatusOptions {
 
 export async function status(options: StatusOptions): Promise<void> {
   const dir = await requireDeployment(options.dir);
+  const { services } = await openDeployment(dir);
 
   const [containers, version, fleet] = await Promise.all([
     docker.ps({ dir }),
-    docker.deployedVersion({ dir }),
-    hosts.list({ dir }),
+    docker.deployedVersion({ dir }, services.control),
+    hosts.list({ dir }, services.control),
   ]);
 
   if (options.json) {

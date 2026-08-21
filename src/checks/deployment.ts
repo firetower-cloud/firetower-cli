@@ -3,6 +3,7 @@ import * as docker from "../docker.js";
 import * as env from "../env.js";
 import * as hosts from "../hosts.js";
 import * as upstream from "../upstream.js";
+import { open as openDeployment, missingVariables } from "../deployment.js";
 import { compare, versionFromTag } from "../version.js";
 import { ok, warn, fail, type Check } from "./index.js";
 
@@ -73,6 +74,18 @@ export const environment: Check = {
       );
     }
 
+    // A release can add a variable Compose refuses to start without. Better
+    // found here than at the next restart.
+    const { compose } = await openDeployment(dir);
+    const missing = missingVariables(compose, values);
+    if (missing.length > 0) {
+      return fail(
+        ".env",
+        `${missing.join(", ")} missing, and the compose file requires ${missing.length === 1 ? "it" : "them"}`,
+        "upgrade the CLI: npm i -g @firetower/cli@latest",
+      );
+    }
+
     return ok(".env", key ? "complete" : "complete, root key on the volume");
   },
 };
@@ -118,8 +131,9 @@ export const workerDrift: Check = {
   async run({ dir }) {
     if (!dir) return fail("workers", "no deployment found");
 
-    const deployed = await docker.deployedVersion({ dir });
-    const fleet = await hosts.list({ dir });
+    const { services } = await openDeployment(dir);
+    const deployed = await docker.deployedVersion({ dir }, services.control);
+    const fleet = await hosts.list({ dir }, services.control);
 
     if (!fleet) {
       return warn(
@@ -159,7 +173,8 @@ export const upToDate: Check = {
   async run({ dir }) {
     if (!dir) return fail("version", "no deployment found");
 
-    const deployed = await docker.deployedVersion({ dir });
+    const { services } = await openDeployment(dir);
+    const deployed = await docker.deployedVersion({ dir }, services.control);
     if (!deployed) return warn("version", "the control plane did not answer");
 
     const { tag } = await upstream.deployment();
