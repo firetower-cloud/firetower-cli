@@ -1,0 +1,43 @@
+# The commit messages are the input to versioning.
+#
+# release-please reads what lands on main and decides the next version from it:
+# `feat:` moves the minor, `fix:` the patch, and a message that says neither
+# produces a release that bumps nothing and explains nothing. So this is a
+# correctness check, not a style one.
+#
+# The title is checked as well as the commits, and matters more: a squash merge
+# throws every commit message away and keeps the pull request title, which is
+# then the only thing release-please ever sees.
+name: commits
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  conventional:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # release-please's own pull requests are written by release-please.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: the title, which is what a squash merge keeps
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: echo "$TITLE" | pnpm commitlint
+
+      - name: and every commit, for a merge that keeps them
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: pnpm commitlint --from "$BASE" --to "$HEAD"
