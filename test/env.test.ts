@@ -111,6 +111,43 @@ describe("format", () => {
   it("omits a key it was not given", () => {
     expect(env.format({ DOMAIN: "example.com" })).not.toContain("POSTGRES_PASSWORD=");
   });
+
+  it("writes the ports it was given", () => {
+    const values = env.parse(env.format({ HTTP_PORT: "8080", HTTPS_PORT: "8443" }));
+
+    expect(values.HTTP_PORT).toBe("8080");
+    expect(values.HTTPS_PORT).toBe("8443");
+  });
+
+  it("keeps a key it has nothing to say about", () => {
+    // `merge` preserves everything already in a `.env`, and this used to throw
+    // that away again on the way out: a re-install in a directory that already
+    // had one would silently drop FIRETOWER_TRUSTED_PROXY, and the deployment
+    // would come back with the header trusted from nowhere.
+    const values = env.parse(
+      env.format({
+        DOMAIN: "example.com",
+        FIRETOWER_TRUSTED_PROXY_HEADER: "X-Forwarded-Email",
+        FIRETOWER_TRUSTED_PROXY: "172.16.0.0/12",
+        POSTGRES_USER: "ft",
+      }),
+    );
+
+    expect(values.FIRETOWER_TRUSTED_PROXY_HEADER).toBe("X-Forwarded-Email");
+    expect(values.FIRETOWER_TRUSTED_PROXY).toBe("172.16.0.0/12");
+    expect(values.POSTGRES_USER).toBe("ft");
+    expect(values.DOMAIN).toBe("example.com");
+  });
+
+  it("survives a round trip through merge", () => {
+    const existing = env.parse(
+      env.format({ HTTP_PORT: "8080", HTTPS_PORT: "8443", FIRETOWER_TRUSTED_PROXY: "10.0.0.0/8" }),
+    );
+    const merged = env.merge(existing, { HTTP_PORT: "80", DOMAIN: "example.com" });
+
+    expect(merged.HTTP_PORT).toBe("8080");
+    expect(env.parse(env.format(merged)).FIRETOWER_TRUSTED_PROXY).toBe("10.0.0.0/8");
+  });
 });
 
 describe("the database password", () => {

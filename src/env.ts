@@ -153,11 +153,33 @@ export interface Rendered {
 }
 
 /**
+ * The keys this file knows how to explain, in the order it writes them.
+ *
+ * Anything else a deployment holds is written after them, untouched — see
+ * `format`.
+ */
+const EXPLAINED = [
+  "DOMAIN",
+  "HTTP_PORT",
+  "HTTPS_PORT",
+  "FIRETOWER_PUBLIC_URL",
+  "POSTGRES_PASSWORD",
+  "FIRETOWER_ROOT_KEY",
+  "ADMIN_USERNAME",
+  "ADMIN_INITIAL_PASSWORD",
+];
+
+/**
  * The file, with the comments that explain each decision.
  *
  * Written rather than templated from `deploy/.env.example`: that file is
  * addressed to somebody filling it in by hand, and half of it is instructions
  * for decisions this CLI has already made.
+ *
+ * Every other key is carried over verbatim at the end. Emitting only the ones
+ * above would silently drop `FIRETOWER_TRUSTED_PROXY`, `POSTGRES_USER` and
+ * anything a later release adds — from a file this CLI did not write all of,
+ * and on a re-run that was only ever meant to fill in what was missing.
  */
 export function format(values: Env): string {
   const line = (key: string) =>
@@ -168,10 +190,18 @@ export function format(values: Env): string {
 # Everything here is a secret or a decision. Nothing regenerates it: re-running
 # \`firetower install\` reads this file first and fills only what is missing.
 
-# Where you reach Firetower. Blank serves plain HTTP on port 80.
+# Where you reach Firetower. Blank serves plain HTTP, which is what you want
+# when nothing outside this machine reaches it, and when a reverse proxy you
+# already run is the thing holding the certificate.
 ${line("DOMAIN")}
-# Only used for the URL printed on the first start — Firetower listens on 4400
-# inside its container and cannot know what Caddy answers on.
+# Which ports Caddy publishes here. **Pinned to 80 and 443 whenever DOMAIN is
+# set above** — Let's Encrypt answers the certificate challenge on those two
+# specifically, and a challenge that keeps failing earns a rate limit measured
+# in days.
+${line("HTTP_PORT")}${line("HTTPS_PORT")}
+# Only used for the URL printed on the first start and in notifications —
+# Firetower listens on 4400 inside its container and cannot know what is in
+# front of it.
 ${line("FIRETOWER_PUBLIC_URL")}
 # The database.
 ${line("POSTGRES_PASSWORD")}
@@ -186,7 +216,17 @@ ${line("FIRETOWER_ROOT_KEY")}
 #
 # Delete the password below once you have replaced it. It is plaintext here, and
 # visible in \`docker compose config\`.
-${line("ADMIN_USERNAME")}${line("ADMIN_INITIAL_PASSWORD")}`;
+${line("ADMIN_USERNAME")}${line("ADMIN_INITIAL_PASSWORD")}${carried(values)}`;
+}
+
+/** Whatever else was in the file, kept rather than explained. */
+function carried(values: Env): string {
+  const rest = Object.keys(values).filter((key) => !EXPLAINED.includes(key));
+  if (rest.length === 0) return "";
+
+  return `\n# Kept from the file that was already here.\n${rest
+    .map((key) => `${key}=${render(values[key] ?? "")}\n`)
+    .join("")}`;
 }
 
 /** Write it, and make it unreadable to anyone else on the machine. */

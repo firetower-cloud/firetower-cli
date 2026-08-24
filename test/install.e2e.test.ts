@@ -4,6 +4,7 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as env from "../src/env.js";
+import * as services from "../src/services.js";
 
 /**
  * The install path, against a real Docker daemon.
@@ -65,5 +66,19 @@ describe("install", () => {
     // And the compose file it wrote is the one the release publishes.
     const compose = await readFile(join(dir, "firetower.yml"), "utf8");
     expect(compose).toContain("ghcr.io/firetower-cloud/firetower");
+
+    // The ports are written exactly when the release can honour them, and
+    // never otherwise. A `.env` naming a port the compose file does not read
+    // is worse than one that stays quiet: it tells the operator they changed
+    // something that never moved.
+    if (services.portsAreConfigurable(compose)) {
+      expect(after?.HTTP_PORT).toBe("80");
+      expect(after?.HTTPS_PORT).toBe("443");
+    } else {
+      expect(after?.HTTP_PORT).toBeUndefined();
+    }
+
+    // Whatever the ports are, the URL that was printed agrees with them.
+    expect(after?.FIRETOWER_PUBLIC_URL).toBe("http://localhost");
   });
 });

@@ -21,6 +21,7 @@ interface ComposeFile {
 interface ComposeService {
   image?: string;
   environment?: Record<string, string | null> | string[];
+  ports?: unknown;
 }
 
 export interface Services {
@@ -81,6 +82,34 @@ export function resolve(compose: string): Services {
     proxy: by((image) => /(^|\/)(caddy|nginx|traefik)[:@]/.test(image)),
     all: names,
   };
+}
+
+/**
+ * Whether this compose file lets the operator choose the ports it publishes.
+ *
+ * Asked rather than assumed, because the CLI writes whatever compose file the
+ * current release publishes and a release older than `HTTP_PORT` hardcodes
+ * `"80:80"`. Offering the choice against one of those would write a value into
+ * `.env` that nothing reads, and the install would fail on the very port
+ * conflict the question was asked to avoid.
+ *
+ * The variable has to be in the proxy's own `ports`, not merely somewhere in
+ * the file: that is the only place publishing it changes anything.
+ */
+export function portsAreConfigurable(compose: string): boolean {
+  let services: Record<string, ComposeService>;
+
+  try {
+    services = parseServices(compose);
+  } catch {
+    return false;
+  }
+
+  const proxy = resolve(compose).proxy;
+  const ports = proxy ? services[proxy]?.ports : undefined;
+  if (!Array.isArray(ports)) return false;
+
+  return ports.some((entry) => typeof entry === "string" && entry.includes("${HTTP_PORT"));
 }
 
 /**

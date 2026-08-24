@@ -9,8 +9,8 @@ firetower install
 
 ## What it does
 
-`firetower install` checks the machine before it writes anything, asks four
-questions, generates the two secrets you would otherwise generate by hand, and
+`firetower install` checks the machine before it writes anything, asks a handful
+of questions, generates the two secrets you would otherwise generate by hand, and
 brings the stack up. It prints the administrator's password once and makes you
 acknowledge the root key, because that key is the only unrecoverable thing here.
 
@@ -19,6 +19,40 @@ of your machines are still running an older worker, naming each one and the
 command to fix it. The control plane already compares its version against every
 worker's on each handshake; this asks it, and turns the answer into something to
 paste.
+
+## How people will reach it
+
+The first question, because the rest of the install follows from it:
+
+| Answer | Certificate | Published ports |
+| --- | --- | --- |
+| Only from this machine | none | yours to choose |
+| On a public domain | Caddy gets one automatically | **80 and 443** |
+| Behind a reverse proxy you already run | yours | yours to choose |
+
+The ports are pinned by a domain and not by preference: Let's Encrypt answers the
+certificate challenge on 80 and 443 specifically — HTTP-01 on one, TLS-ALPN on
+the other — so a certificate cannot be issued anywhere else, and a challenge that
+keeps failing earns a rate limit measured in days.
+
+Every other shape is free to move, which is the answer when something already
+holds 80. `install` reads which ports are free and offers the ones that are:
+
+```sh
+firetower install --http-port 8080 --https-port 8443
+```
+
+If a reverse proxy you already run is the thing holding 80, tell the CLI what it
+serves — with your proxy in front, nothing here can work it out, and it is the
+address printed at the end and carried in every notification:
+
+```sh
+firetower install --public-url https://firetower.example.com --http-port 8080
+```
+
+Firetower then serves plain HTTP on that port for your proxy to pass through to.
+Choosing the ports needs a Firetower release that reads `HTTP_PORT`; against an
+older one the CLI says so rather than writing a value nothing honours.
 
 ## Requirements
 
@@ -46,6 +80,11 @@ firetower --version            this CLI's version, and the deployed one
 
 Global flags: `--dir <path>` (remembered after `install`), `--yes` for
 unattended runs, `--json` on any command that answers a question.
+
+`install` flags: `--domain`, `--public-url`, `--http-port`, `--https-port`,
+`--admin-username`, `--acme-email`. Each of the first two names one of the three
+shapes above, so there is no combination to reconcile — and `--http-port`
+alongside `--domain` is refused rather than quietly ignored.
 
 ## Unattended
 

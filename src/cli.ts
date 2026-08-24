@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command, Option } from "commander";
+import { Command, Option, InvalidArgumentError } from "commander";
 import * as docker from "./docker.js";
 import { findDeployment } from "./config.js";
 import { cliVersion } from "./version.js";
@@ -49,10 +49,24 @@ const globals = () =>
 const checkVersion = () =>
   gate({ yes: globals().yes, skip: globals().skipVersionCheck });
 
+/** A port, refused here rather than three screens into an install. */
+const port = (value: string): number => {
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new InvalidArgumentError("a port between 1 and 65535");
+  }
+
+  return parsed;
+};
+
 program
   .command("install")
   .description("install the control plane on this machine")
-  .option("--domain <domain>", "the domain to serve on; omit for plain HTTP on port 80")
+  .option("--domain <domain>", "the domain to serve on; Firetower gets the certificate")
+  .option("--public-url <url>", "the address your own reverse proxy serves")
+  .option("--http-port <port>", "publish HTTP here instead of 80", port)
+  .option("--https-port <port>", "publish HTTPS here instead of 443", port)
   .option("--admin-username <name>", "the first administrator", "admin")
   .option("--acme-email <email>", "where Let's Encrypt sends renewal warnings")
   .action(async (options) => {
@@ -62,6 +76,9 @@ program
       dir,
       yes,
       domain: options.domain,
+      publicUrl: options.publicUrl,
+      httpPort: options.httpPort,
+      httpsPort: options.httpsPort,
       adminUsername: options.adminUsername,
       acmeEmail: options.acmeEmail,
     });

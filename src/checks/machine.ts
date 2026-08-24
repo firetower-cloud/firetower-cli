@@ -43,22 +43,32 @@ export const composePlugin: Check = {
   },
 };
 
+/**
+ * The ports being published, not a fixed pair.
+ *
+ * `install` asks which ones before this runs, so a machine that already has
+ * something on 80 is checked against the answer rather than against the
+ * default it was just moved off.
+ */
 export const ports: Check = {
-  name: "ports 80, 443",
+  name: "ports",
   preflight: true,
   deployment: false,
-  async run() {
+  async run({ httpPort = 80, httpsPort = 443 }) {
+    const wanted = [...new Set([httpPort, httpsPort])];
+    const name = `ports ${wanted.join(", ")}`;
+
     const busy: number[] = [];
-    for (const port of [80, 443]) {
+    for (const port of wanted) {
       if (!(await docker.portIsFree(port))) busy.push(port);
     }
 
     return busy.length === 0
-      ? ok("ports 80, 443", "free")
+      ? ok(name, "free")
       : fail(
-          "ports 80, 443",
+          name,
           `${busy.join(" and ")} already in use`,
-          "stop whatever holds them, or put Firetower behind it",
+          "stop whatever holds them, or publish Firetower on other ports",
         );
   },
 };
@@ -141,13 +151,22 @@ export const registries: Check = {
  * Worth the network call because the failure it prevents is the expensive one:
  * Caddy asks Let's Encrypt, the challenge fails because the name resolves
  * somewhere else, and the rate limit that follows is measured in days.
+ *
+ * That rate limit is also the whole reason the published ports are pinned to 80
+ * and 443 when there is a domain — the challenge is answered on those two and
+ * nowhere else. The two decisions are the same decision, so they are written
+ * down together.
+ *
+ * A deployment behind somebody's own reverse proxy has no domain here and gets
+ * no certificate from us, so there is nothing for this to protect and `install`
+ * passes no domain at all.
  */
 export const domainResolves: Check = {
   name: "domain",
   preflight: true,
   deployment: true,
   async run({ domain }) {
-    if (!domain) return ok("domain", "none — plain HTTP on port 80");
+    if (!domain) return ok("domain", "none — no certificate to get");
 
     let addresses: string[];
     try {

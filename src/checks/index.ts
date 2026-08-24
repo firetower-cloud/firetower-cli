@@ -33,6 +33,12 @@ export interface Context {
   dir: string | null;
   /** The domain being installed, when `install` is asking. */
   domain?: string | null;
+  /**
+   * The ports this deployment publishes. Absent means the defaults, which is
+   * what every deployment older than `HTTP_PORT` has.
+   */
+  httpPort?: number;
+  httpsPort?: number;
 }
 
 export function ok(name: string, detail?: string): Result {

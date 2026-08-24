@@ -117,3 +117,38 @@ describe("interpolate", () => {
     expect(services.interpolate("${A:-fallback}", { A: "" })).toBe("fallback");
   });
 });
+
+describe("portsAreConfigurable", () => {
+  it("says yes for the compose file this CLI ships", () => {
+    expect(services.portsAreConfigurable(COMPOSE)).toBe(true);
+  });
+
+  it("says no for a release that hardcodes the ports", () => {
+    // The trap this exists for. The compose file comes from the Firetower
+    // release, not from this CLI, so one published before HTTP_PORT existed
+    // still says "80:80" — and offering the choice against it would write a
+    // value into `.env` that nothing reads, then fail on the very conflict the
+    // question was asked to avoid.
+    const older = COMPOSE.replace('"${HTTP_PORT:-80}:80"', '"80:80"').replace(
+      '"${HTTPS_PORT:-443}:443"',
+      '"443:443"',
+    );
+
+    expect(services.portsAreConfigurable(older)).toBe(false);
+  });
+
+  it("wants the variable in the proxy's own ports, not merely in the file", () => {
+    // A mention in a comment, or on another service, publishes nothing.
+    const mentioned = COMPOSE.replace(
+      '"${HTTP_PORT:-80}:80"',
+      '"80:80"  # HTTP_PORT is not read here',
+    );
+
+    expect(services.portsAreConfigurable(mentioned)).toBe(false);
+  });
+
+  it("says no rather than throwing on a file it cannot read", () => {
+    expect(services.portsAreConfigurable("this: is: not: yaml:")).toBe(false);
+    expect(services.portsAreConfigurable("")).toBe(false);
+  });
+});

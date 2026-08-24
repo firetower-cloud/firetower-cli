@@ -15,16 +15,41 @@ import { ui, pc } from "../ui.js";
 export interface InstallOptions {
   dir?: string;
   domain?: string;
+  publicUrl?: string;
+  httpPort?: number;
+  httpsPort?: number;
   adminUsername?: string;
   acmeEmail?: string;
   yes?: boolean;
 }
 
+/**
+ * How people get to this Firetower.
+ *
+ * The first question, because everything else follows from it: whether Caddy
+ * asks for a certificate, whether the published ports can move, and what the
+ * URL at the end says.
+ */
+export type Reach =
+  | { kind: "local" }
+  | { kind: "domain"; domain: string }
+  | { kind: "proxy"; publicUrl: string };
+
+interface Ports {
+  http: number;
+  https: number;
+  /** Whether the release being installed reads them at all. */
+  configurable: boolean;
+}
+
+const STANDARD = { http: 80, https: 443 };
+const ALTERNATE = { http: 8080, https: 8443 };
+
 const cancelled = (value: unknown): boolean => prompts.isCancel(value);
 
-function stop(message: string): never {
+function stop(message: string, remedy?: string): never {
   ui.blank();
-  ui.fail(message);
+  ui.fail(message, remedy);
   ui.blank();
   process.exit(1);
 }
@@ -35,17 +60,39 @@ export async function install(options: InstallOptions): Promise<void> {
   const dir = options.dir ?? (options.yes ? defaultInstallDir() : null);
 
   // Before anything is asked, so a machine that cannot host this says so
-  // before the operator has answered four questions.
+  // before the operator has answered a page of questions.
   if (dir && (await exists(join(dir, docker.COMPOSE_FILE)))) {
     stop(`Firetower is already installed in ${dir}. Use \`firetower upgrade\`.`);
   }
 
-  const domain = await askDomain(options);
+  const reach = await askReach(options);
 
+  // Fetched before the machine is checked, rather than after. Which ports to
+  // check is the next question, and this file is what says whether they can be
+  // moved at all.
+  ui.blank();
+  ui.step("Fetching the deployment files");
+  const files = await upstream.deployment();
+
+  if (files.tag) {
+    ui.ok("firetower.yml", `firetower-cloud/firetower @ ${files.tag}`);
+    ui.ok("Caddyfile", `firetower-cloud/firetower @ ${files.tag}`);
+  } else {
+    ui.warn("using the bundled deployment files", "github was unreachable; they may be older");
+  }
+
+  const ports = await choosePorts(reach, files.compose, options);
+
+  ui.blank();
   ui.step("Checking this machine");
   const results = await runChecks(
     machineChecks.filter((c) => c.preflight),
-    { dir: dir ?? process.cwd(), domain },
+    {
+      dir: dir ?? process.cwd(),
+      domain: reach.kind === "domain" ? reach.domain : null,
+      httpPort: ports.http,
+      httpsPort: ports.https,
+    },
   );
 
   for (const result of results) {
@@ -62,19 +109,6 @@ export async function install(options: InstallOptions): Promise<void> {
     if (cancelled(proceed) || !proceed) stop("Nothing was written.");
   }
 
-  // Fetched rather than carried, so the compose file matches the images about
-  // to be pulled rather than whatever this CLI was published with.
-  ui.blank();
-  ui.step("Fetching the deployment files");
-  const files = await upstream.deployment();
-
-  if (files.tag) {
-    ui.ok("firetower.yml", `firetower-cloud/firetower @ ${files.tag}`);
-    ui.ok("Caddyfile", `firetower-cloud/firetower @ ${files.tag}`);
-  } else {
-    ui.warn("using the bundled deployment files", "github was unreachable; they may be older");
-  }
-
   const directory = dir ?? (await askDirectory());
   const admin = await askAdmin(options);
 
@@ -88,8 +122,13 @@ export async function install(options: InstallOptions): Promise<void> {
   ui.ok("root key", "32 bytes, base64");
 
   const values: env.Env = {
-    DOMAIN: domain ?? "",
-    FIRETOWER_PUBLIC_URL: domain ? `https://${domain}` : "http://localhost",
+    DOMAIN: reach.kind === "domain" ? reach.domain : "",
+    FIRETOWER_PUBLIC_URL: publicUrl(reach, ports),
+    // Only when the release reads them. Writing a value nothing honours is how
+    // somebody ends up sure they changed a port that never moved.
+    ...(ports.configurable
+      ? { HTTP_PORT: String(ports.http), HTTPS_PORT: String(ports.https) }
+      : {}),
     ...secrets,
     ADMIN_USERNAME: admin.username,
     ADMIN_INITIAL_PASSWORD: admin.password,
@@ -100,9 +139,8 @@ export async function install(options: InstallOptions): Promise<void> {
   ui.blank();
   ui.dim(`directory     ${directory}`);
   ui.dim(`url           ${values.FIRETOWER_PUBLIC_URL}`);
-  ui.dim(
-    `certificate   ${domain ? "Caddy, automatic, from Let's Encrypt" : "none — plain HTTP on port 80"}`,
-  );
+  ui.dim(`ports         ${ports.http} and ${ports.https}`);
+  ui.dim(`certificate   ${certificate(reach)}`);
   ui.dim(`admin         ${admin.username}, with the password shown once below`);
   ui.dim(`root key      generated, written to ${join(directory, ".env")}`);
   ui.blank();
@@ -142,24 +180,252 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function askDomain(options: InstallOptions): Promise<string | null> {
-  if (options.domain !== undefined) return options.domain || null;
-  if (options.yes) return null;
+/**
+ * The first question, and the one the rest of the install reads.
+ *
+ * Three answers rather than yes-or-no, because "yes, a domain" used to mean two
+ * things that need different deployments. Somebody who already runs nginx on 80
+ * has a domain *and* cannot give Caddy the ports a certificate needs, and until
+ * there was a third answer this CLI had nothing to offer them.
+ *
+ * Each flag names exactly one of the three, so there is no combination to
+ * reconcile.
+ */
+async function askReach(options: InstallOptions): Promise<Reach> {
+  if (options.domain) return { kind: "domain", domain: options.domain.trim() };
+  if (options.publicUrl) return { kind: "proxy", publicUrl: trimUrl(options.publicUrl) };
 
-  const usesDomain = await prompts.confirm({
-    message: "Will you reach this over a public domain?",
+  // `--domain ""` is how a script says "no domain", and has always meant that.
+  if (options.domain === "" || options.yes) return { kind: "local" };
+
+  const choice = await prompts.select({
+    message: "How will people reach this Firetower?",
+    options: [
+      { value: "local", label: "Only from this machine (http://localhost)" },
+      { value: "domain", label: "On a public domain — Firetower gets the certificate" },
+      { value: "proxy", label: "Behind a reverse proxy I already run" },
+    ],
   });
-  if (cancelled(usesDomain)) stop("Nothing was written.");
-  if (!usesDomain) return null;
+  if (cancelled(choice)) stop("Nothing was written.");
 
-  const domain = await prompts.text({
-    message: "Domain",
-    placeholder: "firetower.example.com",
-    validate: (value) => (value.trim() ? undefined : "A domain, or go back and answer no"),
+  if (choice === "local") return { kind: "local" };
+
+  if (choice === "domain") {
+    const domain = await prompts.text({
+      message: "Domain",
+      placeholder: "firetower.example.com",
+      validate: (value) =>
+        value.trim() ? undefined : "A domain, or go back and choose another answer",
+    });
+    if (cancelled(domain)) stop("Nothing was written.");
+
+    return { kind: "domain", domain: String(domain).trim() };
+  }
+
+  // Asked rather than worked out. With their proxy in front, nothing here can
+  // know what it serves — and this is the URL printed at the end and carried in
+  // every notification.
+  const url = await prompts.text({
+    message: "What address will people open?",
+    placeholder: "https://firetower.example.com",
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed) return "The address your proxy serves";
+      if (!/^https?:\/\/[^/]+/.test(trimmed)) return "Starting with http:// or https://";
+      return undefined;
+    },
   });
-  if (cancelled(domain)) stop("Nothing was written.");
+  if (cancelled(url)) stop("Nothing was written.");
 
-  return String(domain).trim();
+  return { kind: "proxy", publicUrl: trimUrl(String(url)) };
+}
+
+const trimUrl = (value: string): string => value.trim().replace(/\/+$/, "");
+
+/**
+ * Which ports Caddy publishes on this machine.
+ *
+ * A certificate is the thing that takes the choice away: Let's Encrypt answers
+ * the challenge on 80 and 443 specifically — HTTP-01 on one, TLS-ALPN on the
+ * other — so a domain pins both, and a challenge that keeps failing earns a
+ * rate limit measured in days. Every other shape is free to move.
+ */
+async function choosePorts(
+  reach: Reach,
+  compose: string,
+  options: InstallOptions,
+): Promise<Ports> {
+  const configurable = services.portsAreConfigurable(compose);
+  const asked = options.httpPort !== undefined || options.httpsPort !== undefined;
+
+  if (reach.kind === "domain") {
+    if (asked) {
+      stop(
+        "--http-port and --https-port cannot be combined with --domain",
+        "Let's Encrypt answers the certificate challenge on 80 and 443. Use --public-url instead, and put your own proxy in front.",
+      );
+    }
+
+    ui.blank();
+    ui.warn(
+      "ports 80 and 443, and they cannot be moved",
+      "Let's Encrypt answers the certificate challenge on those two",
+    );
+
+    return { ...STANDARD, configurable };
+  }
+
+  // The compose file comes from the release, not from this CLI, and one older
+  // than HTTP_PORT hardcodes 80. Offering the choice anyway would write a value
+  // into `.env` that nothing reads.
+  if (!configurable) {
+    if (asked) {
+      stop(
+        "this Firetower release always publishes 80 and 443",
+        "--http-port needs a release that reads HTTP_PORT",
+      );
+    }
+
+    ui.blank();
+    ui.warn("this release always publishes 80 and 443", "upgrade Firetower to choose the ports");
+
+    return { ...STANDARD, configurable };
+  }
+
+  const chosen = asked
+    ? { http: options.httpPort ?? STANDARD.http, https: options.httpsPort ?? STANDARD.https }
+    : options.yes
+      ? STANDARD
+      : await askPorts();
+
+  if (reach.kind === "proxy") {
+    ui.ok(`point your proxy at http://127.0.0.1:${chosen.http}`);
+  }
+
+  return { ...chosen, configurable };
+}
+
+interface Pair {
+  http: number;
+  https: number;
+}
+
+/** Whether each of a pair is free, as one question. */
+async function probe(pair: Pair): Promise<{ http: boolean; https: boolean }> {
+  const [http, https] = await Promise.all([
+    docker.portIsFree(pair.http),
+    docker.portIsFree(pair.https),
+  ]);
+
+  return { http, https };
+}
+
+function describe(pair: Pair, free: { http: boolean; https: boolean }): string {
+  if (free.http && free.https) return "both free";
+  if (!free.http && !free.https) return "both in use";
+
+  return `${free.http ? pair.https : pair.http} is in use`;
+}
+
+/**
+ * One prompt, showing what was found rather than asking a question the operator
+ * has no way to answer.
+ *
+ * Always asked, even when 80 is free — somebody may want a different port for a
+ * reason this CLI cannot see. What it does not do is make them guess: the
+ * recommendation is a fact about this machine, read a moment ago.
+ */
+async function askPorts(): Promise<Pair> {
+  const standard = await probe(STANDARD);
+
+  const choices = [
+    {
+      value: "standard",
+      label: `${STANDARD.http} and ${STANDARD.https} — ${describe(STANDARD, standard)}`,
+    },
+  ];
+
+  let recommended = "standard";
+
+  if (!standard.http || !standard.https) {
+    const alternate = await probe(ALTERNATE);
+    choices.push({
+      value: "alternate",
+      label: `${ALTERNATE.http} and ${ALTERNATE.https} — ${describe(ALTERNATE, alternate)}`,
+    });
+    recommended = alternate.http && alternate.https ? "alternate" : "choose";
+  }
+
+  choices.push({ value: "choose", label: "Let me choose" });
+
+  const suggested = choices.find((choice) => choice.value === recommended);
+  if (suggested) suggested.label += "  (recommended)";
+
+  const choice = await prompts.select({
+    message: "Which ports should Firetower publish?",
+    options: choices,
+    initialValue: recommended,
+  });
+  if (cancelled(choice)) stop("Nothing was written.");
+
+  if (choice === "standard") return STANDARD;
+  if (choice === "alternate") return ALTERNATE;
+
+  const http = await askPort("HTTP port", ALTERNATE.http);
+  const https = await askPort("HTTPS port", ALTERNATE.https, http);
+
+  return { http, https };
+}
+
+async function askPort(message: string, initial: number, taken?: number): Promise<number> {
+  const busy = new Set<number>();
+
+  for (;;) {
+    const answer = await prompts.text({
+      message,
+      initialValue: String(initial),
+      validate: (value) => {
+        const port = Number(value.trim());
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          return "A port between 1 and 65535";
+        }
+        if (port === taken) return "The other one is already using it";
+        if (busy.has(port)) return `something already answers on ${port}`;
+        return undefined;
+      },
+    });
+    if (cancelled(answer)) stop("Nothing was written.");
+
+    const port = Number(String(answer).trim());
+    if (await docker.portIsFree(port)) return port;
+
+    // `validate` cannot open a socket, so the first refusal happens out here —
+    // and is remembered, so typing the same port again is refused at the prompt
+    // rather than after another round trip.
+    busy.add(port);
+    ui.warn(`something already answers on ${port}`);
+  }
+}
+
+/**
+ * The address to print, which is the one thing here that must not be guessed.
+ *
+ * Exported because it is the join between two answers that are collected pages
+ * apart — how this is reached, and on which port — and getting it wrong prints a
+ * link that goes nowhere while everything else looks like it worked.
+ */
+export function publicUrl(reach: Reach, ports: Pick<Ports, "http">): string {
+  if (reach.kind === "domain") return `https://${reach.domain}`;
+  if (reach.kind === "proxy") return reach.publicUrl;
+
+  return ports.http === 80 ? "http://localhost" : `http://localhost:${ports.http}`;
+}
+
+export function certificate(reach: Reach): string {
+  if (reach.kind === "domain") return "Caddy, automatic, from Let's Encrypt";
+  if (reach.kind === "proxy") return "yours — Firetower serves plain HTTP";
+
+  return "none — plain HTTP";
 }
 
 async function askDirectory(): Promise<string> {
