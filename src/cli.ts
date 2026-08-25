@@ -147,10 +147,32 @@ workers
   .command("install")
   .description("install a worker on this machine")
   .option("--container <name>", "what to call it", "firetower-worker")
+  .option(
+    "--agents <list>",
+    "agents to install, comma separated — asked for when omitted",
+  )
   .action(async (options) => {
     await checkVersion();
-    await worker.install({ container: options.container });
+    await worker.install({
+      container: options.container,
+      agents: options.agents,
+      yes: globals().yes,
+    });
   });
+
+workers
+  .command("agents")
+  .description("the agents this machine can run")
+  .option("--container <name>", "which container", "firetower-worker")
+  .option("--add <kind>", "install one: claude-code, codex")
+  .option("--remove <kind>", "remove one")
+  .action(async (options) =>
+    worker.agents({
+      container: options.container,
+      add: options.add,
+      remove: options.remove,
+    }),
+  );
 
 workers
   .command("upgrade")
