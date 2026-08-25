@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.3.0...v0.4.0) (2026-08-25)
+
+
+### Features
+
+* ask which agents a worker should run, and install them ([a7175cf](https://github.com/firetower-cloud/firetower-cli/commit/a7175cf68adfa50dd1d6e26b23b2de7fcf7fe7b5))
+
 ## [0.3.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.2.0...v0.3.0) (2026-08-24)
 
 
