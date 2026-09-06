@@ -5,6 +5,7 @@ import { findDeployment } from "./config.js";
 import { cliVersion } from "./version.js";
 import { gate } from "./selfcheck.js";
 import { install } from "./commands/install.js";
+import { tunnel } from "./commands/tunnel.js";
 import { upgrade } from "./commands/upgrade.js";
 import { status } from "./commands/status.js";
 import { doctor } from "./commands/doctor.js";
@@ -63,12 +64,12 @@ const port = (value: string): number => {
 program
   .command("install")
   .description("install the control plane on this machine")
-  .option("--domain <domain>", "the domain to serve on; Firetower gets the certificate")
+  .option("--domain <domain>", "serve on this name, with a certificate you put in ./certs")
   .option("--public-url <url>", "the address your own reverse proxy serves")
-  .option("--http-port <port>", "publish HTTP here instead of 80", port)
-  .option("--https-port <port>", "publish HTTPS here instead of 443", port)
+  .option("--http-port <port>", "publish the control plane here instead of 8080", port)
+  .option("--https-port <port>", "publish Caddy here instead of 443, with --domain", port)
   .option("--admin-username <name>", "the first administrator", "admin")
-  .option("--acme-email <email>", "where Let's Encrypt sends renewal warnings")
+  .option("--acme-email <email>", "contact address recorded for the proxy")
   .action(async (options) => {
     await checkVersion();
     const { dir, yes } = globals();
@@ -81,6 +82,22 @@ program
       httpsPort: options.httpsPort,
       adminUsername: options.adminUsername,
       acmeEmail: options.acmeEmail,
+    });
+  });
+
+program
+  .command("tunnel")
+  .description("forward a loopback control plane to this machine, over ssh")
+  .argument("<destination>", "user@host, or an ssh config alias")
+  .option("--local-port <port>", "listen here instead of the remote port", port)
+  .option("--remote-port <port>", "skip reading the remote .env and use this", port)
+  .option("--ssh-config", "print an ~/.ssh/config stanza instead of connecting")
+  .action(async (destination, options) => {
+    await tunnel({
+      destination,
+      localPort: options.localPort,
+      remotePort: options.remotePort,
+      sshConfig: options.sshConfig,
     });
   });
 

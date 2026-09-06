@@ -1,5 +1,7 @@
 import { execa, type Options, type Result } from "execa";
 import { createConnection } from "node:net";
+import { join } from "node:path";
+import * as env from "./env.js";
 
 /**
  * Everything that shells out to Docker.
@@ -102,11 +104,35 @@ export interface ComposeOptions {
   stream?: boolean;
 }
 
+/**
+ * Which optional services this deployment wants, as `--profile` arguments.
+ *
+ * Passed explicitly rather than left to `COMPOSE_PROFILES` in the `.env`.
+ * Compose does read that file, but whether it honours this particular setting
+ * from it has varied between versions — and the failure is quiet in the worst
+ * way: `up -d` succeeds having created no proxy, and the operator is left with
+ * a deployment that never answers on the name they configured.
+ *
+ * Reading the same variable and turning it into a flag costs one file read and
+ * takes the question away.
+ */
+async function profileArgs(dir: string): Promise<string[]> {
+  const values = (await env.read(join(dir, ".env"))) ?? {};
+
+  return (values.COMPOSE_PROFILES ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .flatMap((name) => ["--profile", name]);
+}
+
 export async function compose(
   { dir, stream = false }: ComposeOptions,
   ...args: string[]
 ): Promise<Result> {
-  return run("docker", ["compose", "-f", COMPOSE_FILE, ...args], {
+  const profiles = await profileArgs(dir);
+
+  return run("docker", ["compose", "-f", COMPOSE_FILE, ...profiles, ...args], {
     cwd: dir,
     stdio: stream ? "inherit" : "pipe",
   });
