@@ -18,6 +18,24 @@ import * as services from "../src/services.js";
  */
 
 const CLI = join(import.meta.dirname, "..", "dist", "cli.js");
+
+/**
+ * The CLI under test, invoked without the registry check.
+ *
+ * `install` gates on what the current release says it needs, and rightly so:
+ * an operator whose CLI predates the release it is about to write should be
+ * stopped before it writes one. But the version that gate compares is the
+ * *published* one, and the build under test here is by definition unpublished
+ * — so a release that raises `minimumCli` blocks the very commit that would
+ * satisfy it, and every e2e run until it ships.
+ *
+ * The flag exists for exactly this; `selfcheck.ts` calls it "for working
+ * offline, and for developing this". Nothing is lost by using it, because the
+ * gate is not what this file tests: `selfcheck.test.ts` covers `decide` with
+ * no registry, no release and no daemon in the way.
+ */
+const cli = (...args: string[]): string[] => [CLI, "--skip-version-check", ...args];
+
 let dir: string;
 
 afterAll(async () => {
@@ -31,7 +49,7 @@ describe("install", () => {
   it("brings up a working deployment and keeps its secrets on a re-run", async () => {
     dir = await mkdtemp(join(tmpdir(), "firetower-e2e-"));
 
-    const first = await execa("node", [CLI, "--dir", dir, "--yes", "install"], {
+    const first = await execa("node", cli("--dir", dir, "--yes", "install"), {
       reject: false,
       stdio: "inherit",
     });
@@ -48,11 +66,11 @@ describe("install", () => {
     });
     if (mode) expect(String(mode).trim()).toBe("600");
 
-    const doctor = await execa("node", [CLI, "--dir", dir, "doctor"], { reject: false });
+    const doctor = await execa("node", cli("--dir", dir, "doctor"), { reject: false });
     expect(doctor.exitCode).toBe(0);
 
     // The whole point of this file.
-    const second = await execa("node", [CLI, "--dir", dir, "--yes", "install"], {
+    const second = await execa("node", cli("--dir", dir, "--yes", "install"), {
       reject: false,
     });
 
