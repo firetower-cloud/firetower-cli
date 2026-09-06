@@ -22,7 +22,6 @@ interface ComposeService {
   image?: string;
   environment?: Record<string, string | null> | string[];
   ports?: unknown;
-  profiles?: unknown;
 }
 
 export interface Services {
@@ -148,45 +147,30 @@ export function bindIsConfigurable(compose: string): boolean {
  * upgrade the CLI" instead of Compose's error about a variable the operator
  * has never heard of.
  */
-export function requiredVariables(compose: string, activeProfiles: string[] = []): string[] {
-  const active = new Set(activeProfiles);
-
-  let services: Record<string, ComposeService>;
-  try {
-    services = parseServices(compose);
-  } catch {
-    // A file we cannot parse is one we cannot reason about. Scanning all of it
-    // over-reports rather than under-reports, and over-reporting here means
-    // "set this variable" against a file that may not need it — annoying,
-    // where the other way round is Compose failing with its own error about a
-    // variable the operator has never heard of.
-    return [...new Set(scanForRequired(compose))];
-  }
-
+export function requiredVariables(compose: string): string[] {
   const required = new Set<string>();
 
-  for (const service of Object.values(services)) {
-    // A service behind a profile that is not turned on is not created, so
-    // nothing it asks for is required. This is what lets the proxy insist on
-    // DOMAIN without every tunnel install being told to set one.
-    const profiles = Array.isArray(service.profiles) ? service.profiles : [];
-    if (profiles.length > 0 && !profiles.some((name) => active.has(String(name)))) continue;
+  // Parsed before it is scanned, so that comments are not read as config. The
+  // compose file explains in prose why the proxy's DOMAIN cannot carry a `:?`,
+  // and grepping the raw text found that sentence and believed it.
+  let scannable: string;
+  try {
+    scannable = JSON.stringify(parseYaml(compose));
+  } catch {
+    scannable = compose;
+  }
 
-    for (const name of scanForRequired(JSON.stringify(service))) required.add(name);
+  // Every service, including any behind a profile that is switched off:
+  // Compose interpolates the whole document before it works out which profiles
+  // are on, so a `${VAR:?}` on a service that will never be created still
+  // stops `docker compose` dead. Skipping those would call a variable optional
+  // and then let Compose refuse with its own message about a variable the
+  // operator has never heard of — the exact failure this function prevents.
+  for (const [, name] of scannable.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^}]*\}/g)) {
+    if (name) required.add(name);
   }
 
   return [...required];
-}
-
-/** `${VAR:?message}` — the form Compose refuses to start without. */
-function scanForRequired(text: string): string[] {
-  const found: string[] = [];
-
-  for (const [, name] of text.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^}]*\}/g)) {
-    if (name) found.push(name);
-  }
-
-  return found;
 }
 
 /**

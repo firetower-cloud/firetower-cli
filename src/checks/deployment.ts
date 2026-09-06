@@ -258,10 +258,28 @@ export const certificateExpiry: Check = {
     if (!dir) return fail("certificate", "no deployment found");
 
     const deployment = await openDeployment(dir);
+    const domain = deployment.env.DOMAIN;
+    const tls = (deployment.env.COMPOSE_PROFILES ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .some((name) => name === "tls");
+
+    // The compose file cannot catch this one. Compose interpolates the whole
+    // document before it decides which profiles are on, so `${DOMAIN:?}` on
+    // the proxy would refuse every install that never creates it — which is
+    // most of them. So the requirement lives here instead: with the profile
+    // on and no domain, Caddy's site address is empty and it will not start.
+    if (tls && !domain) {
+      return fail(
+        "certificate",
+        "the tls profile is on but DOMAIN is empty",
+        "set DOMAIN in .env, or remove COMPOSE_PROFILES=tls to go back to loopback and a tunnel",
+      );
+    }
 
     // No proxy means no certificate to have an opinion about: the control
     // plane is on loopback and reached through a tunnel.
-    if (!deployment.env.DOMAIN) return ok("certificate", "none — reached on loopback");
+    if (!domain) return ok("certificate", "none — reached on loopback");
 
     const path = join(dir, "certs", "fullchain.pem");
     const notAfter = await expiryOf(path);

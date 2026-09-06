@@ -66,16 +66,22 @@ describe("requiredVariables", () => {
     expect(services.requiredVariables("x: ${DOMAIN:-:80}")).toEqual([]);
   });
 
-  it("ignores what a service behind an unused profile insists on", () => {
-    // The proxy refuses to start without DOMAIN, and it is right to. But it is
-    // only created with the `tls` profile on, and the default install has no
-    // proxy at all — so telling a tunnel install to set a domain would be
-    // demanding a value for a container that will not exist.
-    expect(services.requiredVariables(COMPOSE)).toEqual(["POSTGRES_PASSWORD"]);
+  it("does not read a comment as config", () => {
+    // The compose file documents, in prose, why the proxy's DOMAIN cannot use
+    // `${DOMAIN:?}` — and a scan of the raw text found that sentence and
+    // reported DOMAIN as required, which failed every install.
+    expect(services.requiredVariables(COMPOSE)).not.toContain("DOMAIN");
   });
 
-  it("asks for it once that profile is turned on", () => {
-    expect(services.requiredVariables(COMPOSE, ["tls"])).toContain("DOMAIN");
+  it("counts one behind a switched-off profile, because Compose does", () => {
+    // The trap. Compose interpolates the whole document before it decides
+    // which profiles are on, so `${VAR:?}` on a service that will never be
+    // created still stops `docker compose` dead — which is why the compose
+    // file cannot use `:?` for the proxy's DOMAIN, and why this must not get
+    // clever about profiles.
+    const guarded = COMPOSE.replace("DOMAIN: ${DOMAIN:-}", "DOMAIN: ${DOMAIN:?set it}");
+
+    expect(services.requiredVariables(guarded)).toContain("DOMAIN");
   });
 });
 
