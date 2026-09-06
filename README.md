@@ -24,35 +24,92 @@ paste.
 
 The first question, because the rest of the install follows from it:
 
-| Answer | Certificate | Published ports |
-| --- | --- | --- |
-| Only from this machine | none | yours to choose |
-| On a public domain | Caddy gets one automatically | **80 and 443** |
-| Behind a reverse proxy you already run | yours | yours to choose |
+| Answer | Certificate | Control plane is published on | Proxy |
+| --- | --- | --- | --- |
+| Only from this machine | none | `127.0.0.1`, port yours to choose | none created |
+| On a name, over HTTPS | **yours**, in `./certs` | `127.0.0.1`, behind Caddy | Caddy, on 443 |
+| Behind a reverse proxy you already run | yours | `127.0.0.1`, port yours to choose | yours |
 
-The ports are pinned by a domain and not by preference: Let's Encrypt answers the
-certificate challenge on 80 and 443 specifically — HTTP-01 on one, TLS-ALPN on
-the other — so a certificate cannot be issued anywhere else, and a challenge that
-keeps failing earns a rate limit measured in days.
+**None of the three puts Firetower on the internet.** That is deliberate rather
+than an omission. The control plane holds every git token, every agent
+credential and the root key, so whoever reaches it can erase the codebase of the
+company that installed it — which is a poor trade for the convenience of an
+automatic certificate.
 
-Every other shape is free to move, which is the answer when something already
-holds 80. `install` reads which ports are free and offers the ones that are:
+### Only from this machine
+
+The default, and the one to want. Nothing is published to the network, so you
+reach it over an ssh tunnel from wherever you actually sit:
 
 ```sh
-firetower install --http-port 8080 --https-port 8443
+firetower install
 ```
 
-If a reverse proxy you already run is the thing holding 80, tell the CLI what it
-serves — with your proxy in front, nothing here can work it out, and it is the
-address printed at the end and carried in every notification:
+The install prints the exact command at the end. This CLI will also run it for
+you, from your own machine — it reads the port off the remote `.env` over the
+same connection it is about to forward:
+
+```sh
+firetower tunnel you@your-server
+firetower tunnel you@your-server --ssh-config   # the stanza, for the long term
+```
+
+Both sides use the same port number on purpose: it makes the address in your
+browser match the one Firetower prints in notifications, and a forward onto a
+port under 1024 would need root on *your* machine. That is also why `install`
+recommends 8080 rather than 80.
+
+### On a name, over HTTPS
+
+For when a tunnel each is not reasonable — several people, on a network they
+already share. Caddy terminates TLS in front of Firetower with a certificate
+**you supply**, and the name never has to be reachable from the internet.
+
+```sh
+firetower install --domain firetower.example.com
+```
+
+Four things go with it:
+
+1. A certificate at `certs/fullchain.pem` and `certs/privkey.pem` in the install
+   directory. It must cover **both** `firetower.example.com` and
+   `*.firetower.example.com` — previews are served on subdomains, so a
+   bare-name certificate leaves them broken. Mint it wherever your DNS
+   credentials already live and copy the result in; the credential never
+   touches the server.
+2. Both names in DNS, pointing at this machine. A private address is the right
+   answer:
+
+   ```
+   firetower.example.com     A   10.0.0.5
+   *.firetower.example.com   A   10.0.0.5
+   ```
+
+3. `install` writes `COMPOSE_PROFILES=tls`, which is what creates the Caddy
+   container at all. Without it there is no proxy.
+4. **Renewal is yours.** Nothing here obtains the certificate, so nothing here
+   renews it. `firetower doctor` warns when there are under three weeks left.
+
+### Behind a reverse proxy you already run
+
+Tell the CLI what your proxy serves — with it in front, nothing here can work
+that out, and it is the address printed at the end and carried in every
+notification:
 
 ```sh
 firetower install --public-url https://firetower.example.com --http-port 8080
 ```
 
-Firetower then serves plain HTTP on that port for your proxy to pass through to.
-Choosing the ports needs a Firetower release that reads `HTTP_PORT`; against an
-older one the CLI says so rather than writing a value nothing honours.
+Firetower then serves plain HTTP on `127.0.0.1:8080` for your proxy to pass
+through to.
+
+### Older releases
+
+Choosing the ports needs a Firetower release that reads `HTTP_PORT`, and holding
+the control plane to loopback needs one that reads `HTTP_BIND`. Against an older
+one the CLI says so rather than writing a value nothing honours — and in the
+second case it says plainly that the release publishes on every interface,
+rather than promising a privacy it cannot deliver.
 
 ## Requirements
 
@@ -63,6 +120,7 @@ installing onto. Node comes with npm, which you needed to install this.
 
 ```
 firetower install              install the control plane on this machine
+firetower tunnel <dest>        forward a loopback control plane to your machine
 firetower upgrade              upgrade it, then report which workers lag
 firetower status               version, health, hosts, worker drift
 firetower doctor               diagnose a deployment that isn't working
@@ -83,8 +141,13 @@ unattended runs, `--json` on any command that answers a question.
 
 `install` flags: `--domain`, `--public-url`, `--http-port`, `--https-port`,
 `--admin-username`, `--acme-email`. Each of the first two names one of the three
-shapes above, so there is no combination to reconcile — and `--http-port`
-alongside `--domain` is refused rather than quietly ignored.
+shapes above, so there is no combination to reconcile.
+
+`tunnel` flags: `--local-port` when the remote port is taken on your machine,
+`--remote-port` to skip reading the remote `.env`, `--ssh-config` to print a
+stanza instead of connecting. It is the one command that runs somewhere other
+than the machine Firetower is installed on, so it needs no `--dir` and does not
+check the deployment's version.
 
 ## Unattended
 

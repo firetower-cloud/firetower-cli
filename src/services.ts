@@ -22,6 +22,7 @@ interface ComposeService {
   image?: string;
   environment?: Record<string, string | null> | string[];
   ports?: unknown;
+  profiles?: unknown;
 }
 
 export interface Services {
@@ -85,6 +86,29 @@ export function resolve(compose: string): Services {
 }
 
 /**
+ * Every `ports:` entry in the file, as strings.
+ *
+ * Which service publishes has moved once already — Caddy used to hold the
+ * published port, and now the control plane publishes its own and Caddy is
+ * only created when there is TLS to terminate. The questions below are about
+ * whether a variable is honoured *anywhere* that publishing happens, so they
+ * ask the file rather than a service picked in advance.
+ */
+function publishedPorts(compose: string): string[] {
+  let services: Record<string, ComposeService>;
+
+  try {
+    services = parseServices(compose);
+  } catch {
+    return [];
+  }
+
+  return Object.values(services)
+    .flatMap((service) => (Array.isArray(service.ports) ? service.ports : []))
+    .filter((entry): entry is string => typeof entry === "string");
+}
+
+/**
  * Whether this compose file lets the operator choose the ports it publishes.
  *
  * Asked rather than assumed, because the CLI writes whatever compose file the
@@ -93,23 +117,28 @@ export function resolve(compose: string): Services {
  * `.env` that nothing reads, and the install would fail on the very port
  * conflict the question was asked to avoid.
  *
- * The variable has to be in the proxy's own `ports`, not merely somewhere in
- * the file: that is the only place publishing it changes anything.
+ * The variable has to be in a `ports` entry, not merely somewhere in the file:
+ * that is the only place publishing it changes anything.
  */
 export function portsAreConfigurable(compose: string): boolean {
-  let services: Record<string, ComposeService>;
+  return publishedPorts(compose).some((entry) => entry.includes("${HTTP_PORT"));
+}
 
-  try {
-    services = parseServices(compose);
-  } catch {
-    return false;
-  }
-
-  const proxy = resolve(compose).proxy;
-  const ports = proxy ? services[proxy]?.ports : undefined;
-  if (!Array.isArray(ports)) return false;
-
-  return ports.some((entry) => typeof entry === "string" && entry.includes("${HTTP_PORT"));
+/**
+ * Whether this compose file lets the operator choose *which interface* the
+ * control plane is published on.
+ *
+ * The same shape of question as `portsAreConfigurable`, and a much more
+ * important one to get right. A release older than `HTTP_BIND` writes no host
+ * address into its `ports` entry, so Docker binds `0.0.0.0` and the control
+ * plane — which holds every credential Firetower has — is on every interface
+ * the machine owns.
+ *
+ * When this is false the answer is never to promise loopback anyway. It is to
+ * say plainly that this release publishes on all of them.
+ */
+export function bindIsConfigurable(compose: string): boolean {
+  return publishedPorts(compose).some((entry) => entry.includes("${HTTP_BIND"));
 }
 
 /**
@@ -119,14 +148,45 @@ export function portsAreConfigurable(compose: string): boolean {
  * upgrade the CLI" instead of Compose's error about a variable the operator
  * has never heard of.
  */
-export function requiredVariables(compose: string): string[] {
+export function requiredVariables(compose: string, activeProfiles: string[] = []): string[] {
+  const active = new Set(activeProfiles);
+
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    // A file we cannot parse is one we cannot reason about. Scanning all of it
+    // over-reports rather than under-reports, and over-reporting here means
+    // "set this variable" against a file that may not need it — annoying,
+    // where the other way round is Compose failing with its own error about a
+    // variable the operator has never heard of.
+    return [...new Set(scanForRequired(compose))];
+  }
+
   const required = new Set<string>();
 
-  for (const [, name] of compose.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^}]*\}/g)) {
-    if (name) required.add(name);
+  for (const service of Object.values(services)) {
+    // A service behind a profile that is not turned on is not created, so
+    // nothing it asks for is required. This is what lets the proxy insist on
+    // DOMAIN without every tunnel install being told to set one.
+    const profiles = Array.isArray(service.profiles) ? service.profiles : [];
+    if (profiles.length > 0 && !profiles.some((name) => active.has(String(name)))) continue;
+
+    for (const name of scanForRequired(JSON.stringify(service))) required.add(name);
   }
 
   return [...required];
+}
+
+/** `${VAR:?message}` — the form Compose refuses to start without. */
+function scanForRequired(text: string): string[] {
+  const found: string[] = [];
+
+  for (const [, name] of text.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^}]*\}/g)) {
+    if (name) found.push(name);
+  }
+
+  return found;
 }
 
 /**

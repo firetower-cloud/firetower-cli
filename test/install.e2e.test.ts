@@ -72,13 +72,66 @@ describe("install", () => {
     // is worse than one that stays quiet: it tells the operator they changed
     // something that never moved.
     if (services.portsAreConfigurable(compose)) {
-      expect(after?.HTTP_PORT).toBe("80");
-      expect(after?.HTTPS_PORT).toBe("443");
+      expect(after?.HTTP_PORT).toBe("8080");
     } else {
       expect(after?.HTTP_PORT).toBeUndefined();
     }
 
+    // HTTPS is Caddy's, and this shape has no Caddy.
+    expect(after?.HTTPS_PORT).toBeUndefined();
+
     // Whatever the ports are, the URL that was printed agrees with them.
-    expect(after?.FIRETOWER_PUBLIC_URL).toBe("http://localhost");
+    expect(after?.FIRETOWER_PUBLIC_URL).toBe("http://localhost:8080");
+
+    // **The assertion this file exists for now.** Not what was written to
+    // `.env` — what Docker actually published. The bug this catches is an
+    // install that answers "only from this machine" and then puts the control
+    // plane, which holds every credential Firetower has, on the machine's
+    // public address. A host firewall would not have saved it either: Docker's
+    // DNAT rules are consulted before the host's INPUT chain.
+    if (services.bindIsConfigurable(compose)) {
+      expect(after?.HTTP_BIND).toBe("127.0.0.1");
+
+      for (const publisher of await publishers(dir)) {
+        expect(publisher).toBe("127.0.0.1");
+      }
+    }
+
+    // And no proxy was created. It is behind the `tls` profile, and this shape
+    // has no certificate to terminate — the control plane serves its own
+    // interface, API and preview routing, so a proxy here would be a
+    // pass-through in front of a server that is already whole.
+    const { stdout: running } = await execa(
+      "docker",
+      ["compose", "-f", "firetower.yml", "ps", "--services"],
+      { cwd: dir, reject: false },
+    );
+    expect(String(running)).not.toContain("caddy");
   });
 });
+
+/**
+ * Which host addresses this deployment actually publishes on.
+ *
+ * Asked of the daemon rather than of the compose file, because the compose
+ * file is the thing under test: a `ports` entry that looks right and a
+ * container listening on 0.0.0.0 is exactly the failure worth catching.
+ */
+async function publishers(dir: string): Promise<string[]> {
+  const { stdout } = await execa(
+    "docker",
+    ["compose", "-f", "firetower.yml", "ps", "--format", "json"],
+    { cwd: dir, reject: false },
+  );
+
+  // One JSON object per line, which is what Compose emits for this format.
+  return String(stdout)
+    .split("\n")
+    .filter((line) => line.trim())
+    .flatMap((line) => {
+      const row = JSON.parse(line) as { Publishers?: { URL?: string }[] };
+      return row.Publishers ?? [];
+    })
+    .map((publisher) => publisher.URL)
+    .filter((url): url is string => Boolean(url));
+}

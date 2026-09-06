@@ -43,8 +43,15 @@ export async function open(dir: string): Promise<Deployment> {
  * required.
  */
 export function missingVariables(compose: string, values: env.Env): string[] {
+  // Which services will exist is part of the question: a variable the proxy
+  // insists on is not missing when there is going to be no proxy.
+  const profiles = (values.COMPOSE_PROFILES ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+
   return services
-    .requiredVariables(compose)
+    .requiredVariables(compose, profiles)
     .filter((name) => {
       const held = values[name];
       return held === undefined || held === "";
