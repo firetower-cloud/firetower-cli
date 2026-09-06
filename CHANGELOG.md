@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.4.0...v0.5.0) (2026-09-06)
+
+
+### Features
+
+* keep the control plane on loopback, and TLS behind a profile ([54559ba](https://github.com/firetower-cloud/firetower-cli/commit/54559bab453edc8ec007897d54a818566e51b36d))
+* keep the control plane on loopback, and TLS behind a profile ([0abc1f2](https://github.com/firetower-cloud/firetower-cli/commit/0abc1f2497f2ade1606f997331745ae9de4f7fc3))
+
+
+### Bug Fixes
+
+* **ci:** let the e2e install past the published-version gate ([d73bb22](https://github.com/firetower-cloud/firetower-cli/commit/d73bb2286405d71cf85f4214e940d0a36d227005))
+* e2e test ([1870119](https://github.com/firetower-cloud/firetower-cli/commit/1870119cd866ed95fabf3f1d091e275cf0b65572))
+* **install:** stop the tls profile's DOMAIN from refusing every install ([55dfee6](https://github.com/firetower-cloud/firetower-cli/commit/55dfee6f972fd7d141691f7e45d80e12340be6c0))
+* **install:** stop the tls profile's DOMAIN from refusing every install ([7adfa22](https://github.com/firetower-cloud/firetower-cli/commit/7adfa22134730e3965bdb4fa068061c7c4a9c31c))
+
 ## [0.4.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.3.0...v0.4.0) (2026-08-25)
 
 
