@@ -83,55 +83,80 @@ describe("install", () => {
     // Whatever the ports are, the URL that was printed agrees with them.
     expect(after?.FIRETOWER_PUBLIC_URL).toBe("http://localhost:8080");
 
-    // **The assertion this file exists for now.** Not what was written to
-    // `.env` — what Docker actually published. The bug this catches is an
-    // install that answers "only from this machine" and then puts the control
-    // plane, which holds every credential Firetower has, on the machine's
-    // public address. A host firewall would not have saved it either: Docker's
-    // DNAT rules are consulted before the host's INPUT chain.
+    // Everything below asks the daemon what exists, rather than asking the
+    // compose file what it meant to do. The compose file is the thing under
+    // test.
+    const running = await containers(dir);
+
+    // No proxy was created. It is behind the `tls` profile, and this shape has
+    // no certificate to terminate — the control plane serves its own
+    // interface, API and preview routing, so a proxy here would be a
+    // pass-through in front of a server that is already whole.
+    //
+    // Asked of the containers and not of `ps --services`, which lists what the
+    // compose file *defines* — profiles and all — and so says "caddy" whether
+    // or not one was ever created.
+    const names = running.map((container) => container.Service);
+
+    // The two positives are not decoration: they fail loudly if this ever
+    // reads an empty list or an output shape without `Service`, which is the
+    // way a `not.toContain` quietly stops testing anything.
+    expect(names).toContain("firetower");
+    expect(names).toContain("postgres");
+    expect(names).not.toContain("caddy");
+
+    // **The assertion this file exists for.** Not what was written to `.env` —
+    // what Docker actually published. The bug this catches is an install that
+    // answers "only from this machine" and then puts the control plane, which
+    // holds every credential Firetower has, on the machine's public address. A
+    // host firewall would not have saved it either: Docker's DNAT rules are
+    // consulted before the host's INPUT chain.
     if (services.bindIsConfigurable(compose)) {
       expect(after?.HTTP_BIND).toBe("127.0.0.1");
 
-      for (const publisher of await publishers(dir)) {
-        expect(publisher).toBe("127.0.0.1");
+      const published = running
+        .flatMap((container) => container.Publishers ?? [])
+        .filter((publisher) => publisher.URL);
+
+      // There has to be one, or the loop below proves nothing. The control
+      // plane publishes exactly one port and Postgres publishes none.
+      expect(published.length).toBeGreaterThan(0);
+
+      for (const publisher of published) {
+        expect(publisher.URL).toBe("127.0.0.1");
       }
     }
-
-    // And no proxy was created. It is behind the `tls` profile, and this shape
-    // has no certificate to terminate — the control plane serves its own
-    // interface, API and preview routing, so a proxy here would be a
-    // pass-through in front of a server that is already whole.
-    const { stdout: running } = await execa(
-      "docker",
-      ["compose", "-f", "firetower.yml", "ps", "--services"],
-      { cwd: dir, reject: false },
-    );
-    expect(String(running)).not.toContain("caddy");
   });
 });
 
+interface ComposeContainer {
+  Service?: string;
+  Publishers?: { URL?: string }[];
+}
+
 /**
- * Which host addresses this deployment actually publishes on.
+ * The containers this deployment actually has.
  *
- * Asked of the daemon rather than of the compose file, because the compose
- * file is the thing under test: a `ports` entry that looks right and a
- * container listening on 0.0.0.0 is exactly the failure worth catching.
+ * Compose has emitted this two ways depending on the version — one JSON object
+ * per line, or a single JSON array — and getting it wrong is worse than
+ * noisy: an unparsed array yields no rows, and every assertion above it passes
+ * by finding nothing. So both are accepted, and the caller checks it found
+ * something.
  */
-async function publishers(dir: string): Promise<string[]> {
+async function containers(dir: string): Promise<ComposeContainer[]> {
   const { stdout } = await execa(
     "docker",
     ["compose", "-f", "firetower.yml", "ps", "--format", "json"],
     { cwd: dir, reject: false },
   );
 
-  // One JSON object per line, which is what Compose emits for this format.
-  return String(stdout)
+  const text = String(stdout).trim();
+  if (!text) return [];
+
+  if (text.startsWith("[")) return JSON.parse(text) as ComposeContainer[];
+
+  return text
     .split("\n")
     .filter((line) => line.trim())
-    .flatMap((line) => {
-      const row = JSON.parse(line) as { Publishers?: { URL?: string }[] };
-      return row.Publishers ?? [];
-    })
-    .map((publisher) => publisher.URL)
-    .filter((url): url is string => Boolean(url));
+    .map((line) => JSON.parse(line) as ComposeContainer);
 }
