@@ -44,11 +44,11 @@ export async function open(dir: string): Promise<Deployment> {
  */
 export function missingVariables(compose: string, values: env.Env): string[] {
   // Which services will exist is part of the question: a variable the proxy
-  // insists on is not missing when there is going to be no proxy.
-  const profiles = (values.COMPOSE_PROFILES ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean);
+  // insists on is not missing when there is going to be no proxy. What Compose
+  // itself demands of a proxy it will not create is `dormantRequiredVariables`,
+  // and it is answered where the command runs rather than asked of the
+  // operator.
+  const profiles = services.activeProfiles(values);
 
   return services
     .requiredVariables(compose, profiles)
