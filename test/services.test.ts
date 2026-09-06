@@ -79,6 +79,73 @@ describe("requiredVariables", () => {
   });
 });
 
+describe("dormantRequiredVariables", () => {
+  it("finds what Compose demands for a service it will not create", () => {
+    // The failure this exists for. Profiles decide which containers are
+    // created, not which variables are interpolated — so `docker compose pull`
+    // in a default install used to stop on the proxy's DOMAIN, naming a
+    // container that was never going to exist.
+    expect(services.dormantRequiredVariables(COMPOSE)).toEqual(["DOMAIN"]);
+  });
+
+  it("is empty once that profile is on, because then it is a real question", () => {
+    // Answered by `missingVariables` at that point, and asked of the operator.
+    // A placeholder here would be a certificate served for a name nobody chose.
+    expect(services.dormantRequiredVariables(COMPOSE, ["tls"])).toEqual([]);
+  });
+
+  it("leaves a variable a live service also insists on alone", () => {
+    const shared = `services:
+  firetower:
+    image: ghcr.io/firetower-cloud/firetower:latest
+    environment:
+      SECRET: \${SHARED:?set SHARED}
+  caddy:
+    profiles: [tls]
+    image: caddy:2-alpine
+    environment:
+      SECRET: \${SHARED:?set SHARED}
+`;
+
+    // The control plane is created and will read it. Satisfying it with a
+    // placeholder would start the deployment on a value nobody chose, which is
+    // the one outcome worse than refusing.
+    expect(services.dormantRequiredVariables(shared)).toEqual([]);
+    expect(services.requiredVariables(shared)).toEqual(["SHARED"]);
+  });
+
+  it("ignores a variable that merely has a default", () => {
+    const soft = COMPOSE.replace(
+      "${DOMAIN:?set DOMAIN in .env, or turn the tls profile off}",
+      "${DOMAIN:-}",
+    );
+
+    expect(services.dormantRequiredVariables(soft)).toEqual([]);
+  });
+
+  it("invents nothing for a file it cannot read", () => {
+    // `requiredVariables` over-reports the same file to the operator. Answering
+    // one of those with a placeholder would be answering a real question.
+    expect(services.dormantRequiredVariables("{{{ not yaml")).toEqual([]);
+  });
+});
+
+describe("activeProfiles", () => {
+  it("reads what .env turns on", () => {
+    expect(services.activeProfiles({ COMPOSE_PROFILES: "tls" })).toEqual(["tls"]);
+    expect(services.activeProfiles({ COMPOSE_PROFILES: " tls , extra " })).toEqual([
+      "tls",
+      "extra",
+    ]);
+  });
+
+  it("is empty for a deployment that turns nothing on", () => {
+    // Not `[""]`, which would become `--profile ""` and a Compose error.
+    expect(services.activeProfiles({})).toEqual([]);
+    expect(services.activeProfiles({ COMPOSE_PROFILES: "" })).toEqual([]);
+  });
+});
+
 describe("missingVariables", () => {
   it("is empty when the .env supplies everything required", () => {
     expect(missingVariables(COMPOSE, { POSTGRES_PASSWORD: "hunter2" })).toEqual([]);

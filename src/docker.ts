@@ -1,7 +1,9 @@
 import { execa, type Options, type Result } from "execa";
 import { createConnection } from "node:net";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as env from "./env.js";
+import * as services from "./services.js";
 
 /**
  * Everything that shells out to Docker.
@@ -105,36 +107,77 @@ export interface ComposeOptions {
 }
 
 /**
- * Which optional services this deployment wants, as `--profile` arguments.
+ * What a variable is worth when the only thing that asks for it will not be
+ * created.
  *
- * Passed explicitly rather than left to `COMPOSE_PROFILES` in the `.env`.
- * Compose does read that file, but whether it honours this particular setting
- * from it has varied between versions — and the failure is quiet in the worst
- * way: `up -d` succeeds having created no proxy, and the operator is left with
- * a deployment that never answers on the name they configured.
- *
- * Reading the same variable and turning it into a flag costs one file read and
- * takes the question away.
+ * Something Compose can interpolate and nothing can read. Deliberately not a
+ * plausible domain: if this ever does reach a container, the value should be
+ * the thing that gives away where it came from.
  */
-async function profileArgs(dir: string): Promise<string[]> {
-  const values = (await env.read(join(dir, ".env"))) ?? {};
+const UNREAD = "unset";
 
-  return (values.COMPOSE_PROFILES ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .flatMap((name) => ["--profile", name]);
+interface Invocation {
+  /** `--profile` flags, for the optional services this deployment wants. */
+  profiles: string[];
+  /** Values for the variables Compose demands of services it will not create. */
+  environment: Record<string, string>;
+}
+
+/**
+ * How to run Compose in this directory, read from the deployment rather than
+ * assumed. Two answers, from one read of `.env`.
+ *
+ * **The profiles** are passed explicitly rather than left to
+ * `COMPOSE_PROFILES` in the file. Compose does read that file, but whether it
+ * honours this particular setting from it has varied between versions — and
+ * the failure is quiet in the worst way: `up -d` succeeds having created no
+ * proxy, and the operator is left with a deployment that never answers on the
+ * name they configured.
+ *
+ * **The environment** is the opposite problem, and it is Compose's own. A
+ * profile decides which containers are created; it does not decide which
+ * variables are interpolated, and the whole file is interpolated before any of
+ * it is filtered. So the proxy's `DOMAIN: ${DOMAIN:?…}` refuses to pull in a
+ * deployment that has no proxy — the shape this CLI installs by default — and
+ * the error names a container that was never going to exist. A value only this
+ * command can see gets past that without writing a domain nobody chose into
+ * `.env`, where `doctor` would later read it back as a certificate to check
+ * and `install` would have recorded a decision the operator never made.
+ *
+ * Anything actually set wins, in `.env` or in the environment this process was
+ * given. The placeholder is only ever for a variable with no answer at all.
+ */
+async function invocation(dir: string): Promise<Invocation> {
+  const values = (await env.read(join(dir, ".env"))) ?? {};
+  const profiles = services.activeProfiles(values);
+
+  const environment: Record<string, string> = {};
+  for (const name of services.dormantRequiredVariables(await composeFile(dir), profiles)) {
+    if (!values[name] && !process.env[name]) environment[name] = UNREAD;
+  }
+
+  return { profiles: profiles.flatMap((name) => ["--profile", name]), environment };
+}
+
+/** The compose file, or nothing — Compose fails on a missing one far better. */
+async function composeFile(dir: string): Promise<string> {
+  try {
+    return await readFile(join(dir, COMPOSE_FILE), "utf8");
+  } catch {
+    return "";
+  }
 }
 
 export async function compose(
   { dir, stream = false }: ComposeOptions,
   ...args: string[]
 ): Promise<Result> {
-  const profiles = await profileArgs(dir);
+  const { profiles, environment } = await invocation(dir);
 
   return run("docker", ["compose", "-f", COMPOSE_FILE, ...profiles, ...args], {
     cwd: dir,
     stdio: stream ? "inherit" : "pipe",
+    env: environment,
   });
 }
 
@@ -191,21 +234,30 @@ export async function waitForHealthy(
 
     if (container?.Health === "healthy") return;
     if (container?.State === "exited") {
-      throw new DockerError(
-        `${service} exited while starting`,
-        `docker compose -f ${COMPOSE_FILE} logs ${service}`,
-      );
+      throw new DockerError(`${service} exited while starting`, logsCommand(options, service));
     }
 
     if (Date.now() > deadline) {
       throw new DockerError(
         `${service} did not become healthy within ${Math.round(timeoutMs / 1000)}s`,
-        `docker compose -f ${COMPOSE_FILE} logs ${service}`,
+        logsCommand(options, service),
       );
     }
 
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
+}
+
+/**
+ * What to type to see why, in a deployment that has just refused to start.
+ *
+ * `firetower logs` rather than the `docker compose` line this used to print.
+ * The CLI's own command works in every shape — including the default one,
+ * where a bare `docker compose` in this directory stops on the proxy's
+ * required DOMAIN before it reads a single log line. See `invocation`.
+ */
+function logsCommand({ dir }: ComposeOptions, service: string): string {
+  return `firetower --dir ${dir} logs ${service}`;
 }
 
 /** What the running control plane says its version is. */

@@ -169,13 +169,80 @@ export function requiredVariables(compose: string, activeProfiles: string[] = []
     // A service behind a profile that is not turned on is not created, so
     // nothing it asks for is required. This is what lets the proxy insist on
     // DOMAIN without every tunnel install being told to set one.
-    const profiles = Array.isArray(service.profiles) ? service.profiles : [];
-    if (profiles.length > 0 && !profiles.some((name) => active.has(String(name)))) continue;
+    if (!willBeCreated(service, active)) continue;
 
     for (const name of scanForRequired(JSON.stringify(service))) required.add(name);
   }
 
   return [...required];
+}
+
+/**
+ * The variables Compose *demands* that this deployment has no answer for.
+ *
+ * The other half of the question above, and the one Compose itself asks.
+ * Profiles decide which containers are created; they do not decide which
+ * variables are interpolated. The whole file is interpolated first, so the
+ * proxy's `DOMAIN: ${DOMAIN:?…}` stops `docker compose pull` in a deployment
+ * that has no proxy — an error about a container that was never going to
+ * exist, in the shape this CLI installs by default.
+ *
+ * There is no honest value to write for one of these: the answer to "which
+ * domain" is that there is not one. So nothing here goes into `.env`, where
+ * `doctor` would read a name back as a certificate to check and `install`
+ * would have invented a decision the operator never made. `docker.ts` passes
+ * them to the one command that needs them past interpolation, and nothing
+ * that runs is given them at all.
+ */
+export function dormantRequiredVariables(compose: string, activeProfiles: string[] = []): string[] {
+  const active = new Set(activeProfiles);
+
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    // No profiles to read means no way to tell a dormant service from a live
+    // one, and `requiredVariables` has already over-reported the same file to
+    // the operator. Answering one of those with a placeholder would be
+    // answering a question that may well be real.
+    return [];
+  }
+
+  const dormant = new Set<string>();
+
+  for (const service of Object.values(services)) {
+    if (willBeCreated(service, active)) continue;
+
+    for (const name of scanForRequired(JSON.stringify(service))) dormant.add(name);
+  }
+
+  // One a live service also insists on is not dormant, whatever else asks for
+  // it: that one needs a real value, and `missingVariables` is what says so.
+  for (const name of requiredVariables(compose, activeProfiles)) dormant.delete(name);
+
+  return [...dormant];
+}
+
+/** Whether this deployment's profiles create this service at all. */
+function willBeCreated(service: ComposeService, active: Set<string>): boolean {
+  const profiles = Array.isArray(service.profiles) ? service.profiles : [];
+
+  return profiles.length === 0 || profiles.some((name) => active.has(String(name)));
+}
+
+/**
+ * Which optional services this deployment wants, read from `.env`.
+ *
+ * One reading of `COMPOSE_PROFILES` rather than three: everything that asks
+ * "which containers will exist" — the `--profile` flags, the variables Compose
+ * requires, the checks — has to get the same answer, or the stack that starts
+ * is not the one that was checked.
+ */
+export function activeProfiles(env: Env): string[] {
+  return (env.COMPOSE_PROFILES ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
 }
 
 /** `${VAR:?message}` — the form Compose refuses to start without. */

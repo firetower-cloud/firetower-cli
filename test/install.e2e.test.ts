@@ -3,6 +3,7 @@ import { execa } from "execa";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as docker from "../src/docker.js";
 import * as env from "../src/env.js";
 import * as services from "../src/services.js";
 
@@ -22,10 +23,7 @@ let dir: string;
 afterAll(async () => {
   if (!dir) return;
 
-  await execa("docker", ["compose", "-f", "firetower.yml", "down", "-v"], {
-    cwd: dir,
-    reject: false,
-  });
+  await docker.compose({ dir }, "down", "-v");
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -137,6 +135,12 @@ interface ComposeContainer {
 /**
  * The containers this deployment actually has.
  *
+ * Through the CLI's own runner rather than a bare `docker compose`, for the
+ * reason in `docker.ts`: Compose interpolates every service in the file before
+ * it filters by profile, so the proxy's required DOMAIN refuses the command in
+ * a deployment that has no proxy. What is being asserted is still the daemon's
+ * answer — this only affects how the question is asked.
+ *
  * Compose has emitted this two ways depending on the version — one JSON object
  * per line, or a single JSON array — and getting it wrong is worse than
  * noisy: an unparsed array yields no rows, and every assertion above it passes
@@ -144,11 +148,7 @@ interface ComposeContainer {
  * something.
  */
 async function containers(dir: string): Promise<ComposeContainer[]> {
-  const { stdout } = await execa(
-    "docker",
-    ["compose", "-f", "firetower.yml", "ps", "--format", "json"],
-    { cwd: dir, reject: false },
-  );
+  const { stdout } = await docker.compose({ dir }, "ps", "--format", "json");
 
   const text = String(stdout).trim();
   if (!text) return [];
