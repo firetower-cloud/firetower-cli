@@ -104,6 +104,17 @@ export interface ComposeOptions {
   dir: string;
   /** Stream to the terminal. For pulls and logs, where silence looks hung. */
   stream?: boolean;
+  /**
+   * Run against these profiles instead of the ones `.env` asks for.
+   *
+   * For `down` and nothing else. A profile-gated service is not an orphan —
+   * Compose knows about it and has simply not selected it — so neither
+   * `--remove-orphans` nor a plain `down` touches the container of a service
+   * that moved behind a profile in the release being left. It stays up holding
+   * its ports. Selecting every profile the file defines is what makes a `down`
+   * mean the whole project.
+   */
+  profiles?: string[];
 }
 
 /**
@@ -147,12 +158,23 @@ interface Invocation {
  * Anything actually set wins, in `.env` or in the environment this process was
  * given. The placeholder is only ever for a variable with no answer at all.
  */
-async function invocation(dir: string): Promise<Invocation> {
+async function invocation(dir: string, override?: string[]): Promise<Invocation> {
   const values = (await env.read(join(dir, ".env"))) ?? {};
-  const profiles = services.activeProfiles(values);
+  const profiles = override ?? services.activeProfiles(values);
+  const compose = await composeFile(dir);
+
+  // With an override the placeholder covers more ground, and has to. Turning a
+  // profile on to take its container down makes that service live, so what was
+  // a dormant `${DOMAIN:?…}` a moment ago becomes a variable Compose demands
+  // of a deployment that has no answer for it — and the `down` fails on the
+  // very service it was widened to reach. Anything genuinely missing from a
+  // live service has already been refused by `missingVariables`.
+  const unanswered = override
+    ? services.requiredVariables(compose, profiles)
+    : services.dormantRequiredVariables(compose, profiles);
 
   const environment: Record<string, string> = {};
-  for (const name of services.dormantRequiredVariables(await composeFile(dir), profiles)) {
+  for (const name of unanswered) {
     if (!values[name] && !process.env[name]) environment[name] = UNREAD;
   }
 
@@ -169,10 +191,10 @@ async function composeFile(dir: string): Promise<string> {
 }
 
 export async function compose(
-  { dir, stream = false }: ComposeOptions,
+  { dir, stream = false, profiles: override }: ComposeOptions,
   ...args: string[]
 ): Promise<Result> {
-  const { profiles, environment } = await invocation(dir);
+  const { profiles, environment } = await invocation(dir, override);
 
   return run("docker", ["compose", "-f", COMPOSE_FILE, ...profiles, ...args], {
     cwd: dir,
@@ -196,6 +218,103 @@ export async function composeOrThrow(
   }
 
   return result;
+}
+
+/**
+ * The Compose project name — the namespace for this deployment's containers.
+ *
+ * Asked of Compose rather than assumed. `deploy/firetower.yml` pins `name:
+ * firetower` precisely so it does not follow the directory, and a deployment
+ * made before that pin, or one somebody renamed, would answer differently. The
+ * label below is the only way to find a container Compose no longer manages,
+ * so getting this wrong means finding none.
+ */
+export async function projectName(options: ComposeOptions): Promise<string | null> {
+  const result = await compose(options, "config", "--format", "json");
+
+  if (result.exitCode === 0) {
+    try {
+      const { name } = JSON.parse(String(result.stdout)) as { name?: string };
+      if (name) return name;
+    } catch {
+      // Fall through to the file.
+    }
+  }
+
+  // Compose refusing to interpolate the file is not a reason to give up: the
+  // project name is a literal in it, and reading it directly is exact.
+  const match = /^name:\s*(\S+)\s*$/m.exec(await composeFile(options.dir));
+  return match?.[1] ?? null;
+}
+
+export interface ProjectContainer {
+  name: string;
+  /** The service it was created for, or "" once that service is gone. */
+  service: string;
+  /** Host ports it publishes. */
+  ports: number[];
+}
+
+/** Every container in this deployment's project, running or not, orphans too. */
+export async function projectContainers(options: ComposeOptions): Promise<ProjectContainer[]> {
+  const project = await projectName(options);
+  if (!project) return [];
+
+  const result = await run("docker", [
+    "ps",
+    "--all",
+    "--filter",
+    `label=com.docker.compose.project=${project}`,
+    "--format",
+    '{{.Names}}\t{{.Label "com.docker.compose.service"}}\t{{.Ports}}',
+  ]);
+  if (result.exitCode !== 0) return [];
+
+  return String(result.stdout)
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => {
+      const [name = "", service = "", ports = ""] = line.split("\t");
+      return { name, service, ports: hostPorts(ports) };
+    });
+}
+
+/**
+ * The host side of `docker ps`'s port column.
+ *
+ * `0.0.0.0:80->80/tcp, 443/udp, 2019/tcp` — only the mappings have a host port,
+ * and only those hold anything. The rest is what the image exposes, which binds
+ * nothing on this machine.
+ */
+export function hostPorts(column: string): number[] {
+  const found = new Set<number>();
+
+  for (const [, port] of column.matchAll(/(?:[\d.]+|\[[^\]]+\]):(\d+)->/g)) {
+    if (port) found.add(Number(port));
+  }
+
+  return [...found];
+}
+
+/**
+ * Containers in this project that the compose file no longer accounts for.
+ *
+ * Compose neither creates nor stops these. A service moved behind a profile is
+ * the case that matters: `caddy` went behind `tls`, so an upgrade leaves the
+ * old one running and still holding 80 and 443 — and the new control plane
+ * fails to bind against a container from the release it just replaced.
+ *
+ * `expected` is the services that will exist, profiles already applied.
+ */
+export async function orphans(
+  options: ComposeOptions,
+  expected: string[],
+): Promise<ProjectContainer[]> {
+  const wanted = new Set(expected);
+
+  return (await projectContainers(options)).filter(
+    (container) => !wanted.has(container.service),
+  );
 }
 
 export interface Container {

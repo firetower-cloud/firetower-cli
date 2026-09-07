@@ -20,6 +20,18 @@ import * as services from "../src/services.js";
 const CLI = join(import.meta.dirname, "..", "dist", "cli.js");
 
 /**
+ * A project of its own, and this is not tidiness.
+ *
+ * `deploy/firetower.yml` pins `name: firetower` so that every installation
+ * shares one namespace for its containers, network and volumes — which is
+ * right for a deployment and dangerous for a test. Installing that file here
+ * inherits the pin, so on a machine that also *runs* Firetower the
+ * `down -v` below would remove the real deployment's database volume.
+ * COMPOSE_PROJECT_NAME outranks the name in the file.
+ */
+process.env.COMPOSE_PROJECT_NAME = "firetower-install-e2e";
+
+/**
  * The CLI under test, invoked without the registry check.
  *
  * `install` gates on what the current release says it needs, and rightly so:

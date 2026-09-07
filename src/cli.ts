@@ -70,6 +70,9 @@ program
   .option("--https-port <port>", "publish Caddy here instead of 443, with --domain", port)
   .option("--admin-username <name>", "the first administrator", "admin")
   .option("--acme-email <email>", "contact address recorded for the proxy")
+  // Hidden: installing an old release on purpose is not something to offer, but
+  // it is the only way to test an upgrade *from* one. See upgrade.e2e.test.ts.
+  .addOption(new Option("--tag <tag>", "install this release instead of the latest").hideHelp())
   .action(async (options) => {
     await checkVersion();
     const { dir, yes } = globals();
@@ -82,6 +85,7 @@ program
       httpsPort: options.httpsPort,
       adminUsername: options.adminUsername,
       acmeEmail: options.acmeEmail,
+      tag: options.tag,
     });
   });
 
@@ -105,10 +109,14 @@ program
   .command("upgrade")
   .description("upgrade the control plane, then report which workers lag")
   .option("--no-backup", "skip the database backup")
+  // `upgrade` re-derives which port the control plane is published on, the
+  // same way `install` chooses one. This is for the machine where the derived
+  // answer is wrong and there is nobody there to answer the prompt.
+  .option("--http-port <port>", "publish the control plane here instead of 8080", port)
   .action(async (options) => {
     await checkVersion();
     const { dir, yes } = globals();
-    await upgrade({ dir, yes, backup: options.backup });
+    await upgrade({ dir, yes, backup: options.backup, httpPort: options.httpPort });
   });
 
 program

@@ -1,6 +1,5 @@
 import { mkdir, writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
-import { hostname, userInfo } from "node:os";
 import * as prompts from "@clack/prompts";
 import * as docker from "../docker.js";
 import * as env from "../env.js";
@@ -11,7 +10,28 @@ import { defaultInstallDir, rememberDir } from "../config.js";
 import { invent } from "../password.js";
 import * as services from "../services.js";
 import { missingVariables } from "../deployment.js";
+import {
+  cancelled,
+  certificate,
+  choosePorts,
+  derive,
+  published,
+  publicUrl,
+  stop,
+  tunnelCommand,
+  type Ports,
+  type Reach,
+} from "../shape.js";
 import { ui, pc } from "../ui.js";
+
+/**
+ * `install` asks the questions; `shape.ts` turns the answers into a `.env`.
+ *
+ * Re-exported because `upgrade` derives the same values without asking
+ * anything, and the two commands agreeing about what a deployment looks like is
+ * the whole reason that module exists.
+ */
+export { publicUrl, certificate, published, tunnelCommand, type Reach };
 
 export interface InstallOptions {
   dir?: string;
@@ -22,58 +42,8 @@ export interface InstallOptions {
   adminUsername?: string;
   acmeEmail?: string;
   yes?: boolean;
-}
-
-/**
- * How people get to this Firetower.
- *
- * The first question, because everything else follows from it: whether Caddy
- * asks for a certificate, whether the published ports can move, and what the
- * URL at the end says.
- */
-export type Reach =
-  | { kind: "local" }
-  | { kind: "domain"; domain: string }
-  | { kind: "proxy"; publicUrl: string };
-
-interface Ports {
-  http: number;
-  https: number;
-  /** Whether the release being installed reads them at all. */
-  configurable: boolean;
-  /** Whether it reads `HTTP_BIND` — see `bindIsConfigurable`. */
-  bindable: boolean;
-}
-
-/**
- * Which interface the control plane's port is published on.
- *
- * Loopback, in all three shapes, because the thing being published holds every
- * credential Firetower has. None of the three needs more:
- *
- *   * a tunnel terminates on this machine and connects to 127.0.0.1 from here;
- *   * `domain` puts Caddy in front, and Caddy reaches 4400 over Compose's own
- *     network rather than through the published port;
- *   * a reverse proxy somebody already runs is on this machine — the one case
- *     where it might not be is rare enough to be worth setting HTTP_BIND by
- *     hand, and worth thinking about while doing it.
- *
- * Not a parameter, then, but not a literal either: it is written down here so
- * that the day a shape needs something else, this is where the argument for it
- * has to go.
- */
-const LOOPBACK = "127.0.0.1";
-
-const STANDARD = { http: 80, https: 443 };
-const ALTERNATE = { http: 8080, https: 8443 };
-
-const cancelled = (value: unknown): boolean => prompts.isCancel(value);
-
-function stop(message: string, remedy?: string): never {
-  ui.blank();
-  ui.fail(message, remedy);
-  ui.blank();
-  process.exit(1);
+  /** Install this release rather than the latest. For reproducing a report. */
+  tag?: string;
 }
 
 export async function install(options: InstallOptions): Promise<void> {
@@ -94,7 +64,7 @@ export async function install(options: InstallOptions): Promise<void> {
   // moved at all.
   ui.blank();
   ui.step("Fetching the deployment files");
-  const files = await upstream.deployment();
+  const files = await upstream.deployment({ tag: options.tag });
 
   if (files.tag) {
     ui.ok("firetower.yml", `firetower-cloud/firetower @ ${files.tag}`);
@@ -144,30 +114,10 @@ export async function install(options: InstallOptions): Promise<void> {
   ui.ok("root key", "32 bytes, base64");
 
   const values: env.Env = {
-    DOMAIN: reach.kind === "domain" ? reach.domain : "",
-    FIRETOWER_PUBLIC_URL: publicUrl(reach, ports),
-    // Creates the `caddy` service, which is behind a compose profile and is
-    // not created otherwise. Only the shape that has a certificate to
-    // terminate wants it: the control plane serves its own interface, its own
-    // API and its own preview routing, so with no TLS in the picture a proxy
-    // would be a pass-through in front of a server that is already whole.
-    ...(reach.kind === "domain" ? { COMPOSE_PROFILES: "tls" } : {}),
-    // What preview hostnames hang off. Unset means `localhost`, which is what
-    // a tunnel wants and needs no DNS at all. With a name, it is that name —
-    // and without this line the server would go on minting `*.localhost`
-    // previews that resolve to the browser's own machine.
-    ...(reach.kind === "domain" ? { FIRETOWER_PREVIEW_DOMAIN: reach.domain } : {}),
-    // Only when the release reads them. Writing a value nothing honours is how
-    // somebody ends up sure they changed a port that never moved.
-    ...(ports.configurable
-      ? {
-          HTTP_PORT: String(ports.http),
-          // Caddy's, and Caddy only exists in the shape that has a
-          // certificate. Writing it otherwise would be a value nothing reads.
-          ...(reach.kind === "domain" ? { HTTPS_PORT: String(ports.https) } : {}),
-        }
-      : {}),
-    ...(ports.bindable ? { HTTP_BIND: LOOPBACK } : {}),
+    // The shape — reach, ports, profiles, the URL — from the one place that
+    // knows how to work it out. `upgrade` calls the same function against the
+    // release it is moving to, which is what keeps the two from drifting.
+    ...derive(reach, ports),
     ...secrets,
     ADMIN_USERNAME: admin.username,
     ADMIN_INITIAL_PASSWORD: admin.password,
@@ -335,264 +285,6 @@ async function askReach(options: InstallOptions): Promise<Reach> {
 }
 
 const trimUrl = (value: string): string => value.trim().replace(/\/+$/, "");
-
-/**
- * Which ports this machine publishes.
- *
- * Two different things, and they moved apart when Caddy stopped being created
- * for every install:
- *
- *   * `HTTP_PORT` is the control plane's own, published on loopback in every
- *     shape. This is the one an ssh tunnel forwards.
- *   * `HTTPS_PORT` is Caddy's, and only exists in the `domain` shape, where it
- *     is the address other people actually open.
- *
- * The control plane's port wants to be a high one. A tunnel is easiest when
- * both sides are the same number — that way the address in the browser matches
- * FIRETOWER_PUBLIC_URL — and a forward onto a port below 1024 needs root on the
- * *operator's* machine, which is a strange thing to make somebody do to read a
- * dashboard. In the `domain` shape it is not merely preferable: Caddy publishes
- * 80 there, so leaving the control plane on 80 would collide.
- */
-async function choosePorts(
-  reach: Reach,
-  compose: string,
-  options: InstallOptions,
-): Promise<Ports> {
-  const configurable = services.portsAreConfigurable(compose);
-  const bindable = services.bindIsConfigurable(compose);
-  const asked = options.httpPort !== undefined || options.httpsPort !== undefined;
-
-  // A release older than HTTP_BIND publishes on every interface, and there is
-  // no value to write that changes it. Never promise loopback in that case:
-  // the whole point of this shape is that nothing is on the network.
-  if (!bindable) {
-    ui.blank();
-    ui.warn(
-      "this Firetower release publishes on every interface",
-      "upgrade Firetower — this one cannot be held to loopback, and the control plane holds the vault",
-    );
-  }
-
-  // The compose file comes from the release, not from this CLI, and one older
-  // than HTTP_PORT hardcodes its ports. Offering the choice anyway would write
-  // a value into `.env` that nothing reads.
-  if (!configurable) {
-    if (asked) {
-      stop(
-        "this Firetower release always publishes 80 and 443",
-        "--http-port needs a release that reads HTTP_PORT",
-      );
-    }
-
-    ui.blank();
-    ui.warn("this release always publishes 80 and 443", "upgrade Firetower to choose the ports");
-
-    return { ...STANDARD, configurable, bindable };
-  }
-
-  if (reach.kind === "domain") {
-    const https = options.httpsPort ?? STANDARD.https;
-    // Caddy is the front door here and 443 is where people will look for it.
-    // The control plane's own port stays out of the way behind it.
-    const http = options.httpPort ?? ALTERNATE.http;
-
-    if (http === STANDARD.http) {
-      stop(
-        "the control plane cannot be on 80 with a certificate in front",
-        "Caddy publishes 80 to redirect to 443. Give --http-port something else, or leave it out.",
-      );
-    }
-
-    return { http, https, configurable, bindable };
-  }
-
-  const chosen = asked
-    ? { http: options.httpPort ?? ALTERNATE.http, https: options.httpsPort ?? ALTERNATE.https }
-    : options.yes
-      ? ALTERNATE
-      : await askPorts();
-
-  if (reach.kind === "proxy") {
-    ui.ok(`point your proxy at http://${LOOPBACK}:${chosen.http}`);
-  }
-
-  return { ...chosen, configurable, bindable };
-}
-
-interface Pair {
-  http: number;
-  https: number;
-}
-
-/**
- * One prompt, showing what was found rather than asking a question the operator
- * has no way to answer.
- *
- * Always asked, even when the recommendation is free — somebody may want a
- * different port for a reason this CLI cannot see. What it does not do is make
- * them guess: what is free is a fact about this machine, read a moment ago.
- *
- * A high port leads, and 80 is the fallback rather than the other way round.
- * This is the port an ssh tunnel forwards, and forwarding onto a port under
- * 1024 needs root on the operator's own machine — so recommending 80 quietly
- * makes the next step harder than it has to be.
- */
-async function askPorts(): Promise<Pair> {
-  const alternateIsFree = await docker.portIsFree(ALTERNATE.http);
-
-  const choices = [
-    {
-      value: "alternate",
-      label: `${ALTERNATE.http} — ${alternateIsFree ? "free" : "in use"}`,
-    },
-  ];
-
-  let recommended = "alternate";
-
-  if (!alternateIsFree) {
-    const standardIsFree = await docker.portIsFree(STANDARD.http);
-    choices.push({
-      value: "standard",
-      label: `${STANDARD.http} — ${standardIsFree ? "free" : "in use"}`,
-    });
-    recommended = standardIsFree ? "standard" : "choose";
-  }
-
-  choices.push({ value: "choose", label: "Let me choose" });
-
-  const suggested = choices.find((choice) => choice.value === recommended);
-  if (suggested) suggested.label += "  (recommended)";
-
-  const choice = await prompts.select({
-    message: "Which port should Firetower publish?",
-    options: choices,
-    initialValue: recommended,
-  });
-  if (cancelled(choice)) stop("Nothing was written.");
-
-  if (choice === "alternate") return ALTERNATE;
-  if (choice === "standard") return STANDARD;
-
-  // The HTTPS port travels with it rather than being asked for: nothing
-  // answers on it in this shape — Caddy is what publishes 443, and Caddy is
-  // not created without a certificate to terminate.
-  const http = await askPort("Port", ALTERNATE.http);
-
-  return { http, https: ALTERNATE.https };
-}
-
-async function askPort(message: string, initial: number, taken?: number): Promise<number> {
-  const busy = new Set<number>();
-
-  for (;;) {
-    const answer = await prompts.text({
-      message,
-      initialValue: String(initial),
-      validate: (value) => {
-        const port = Number(value.trim());
-        if (!Number.isInteger(port) || port < 1 || port > 65535) {
-          return "A port between 1 and 65535";
-        }
-        if (port === taken) return "The other one is already using it";
-        if (busy.has(port)) return `something already answers on ${port}`;
-        return undefined;
-      },
-    });
-    if (cancelled(answer)) stop("Nothing was written.");
-
-    const port = Number(String(answer).trim());
-    if (await docker.portIsFree(port)) return port;
-
-    // `validate` cannot open a socket, so the first refusal happens out here —
-    // and is remembered, so typing the same port again is refused at the prompt
-    // rather than after another round trip.
-    busy.add(port);
-    ui.warn(`something already answers on ${port}`);
-  }
-}
-
-/**
- * The address to print, which is the one thing here that must not be guessed.
- *
- * Exported because it is the join between two answers that are collected pages
- * apart — how this is reached, and on which port — and getting it wrong prints a
- * link that goes nowhere while everything else looks like it worked.
- */
-export function publicUrl(reach: Reach, ports: Pick<Ports, "http" | "https">): string {
-  if (reach.kind === "domain") {
-    // Caddy's port, not the control plane's — this is the address other people
-    // open, and they reach the certificate rather than the loopback listener.
-    return ports.https === 443
-      ? `https://${reach.domain}`
-      : `https://${reach.domain}:${ports.https}`;
-  }
-  if (reach.kind === "proxy") return reach.publicUrl;
-
-  // The port is not optional here. Over a tunnel the browser is at
-  // `localhost:8080`, and a notification linking to `localhost` sends whoever
-  // clicks it to port 80 on their own machine.
-  return ports.http === 80 ? "http://localhost" : `http://localhost:${ports.http}`;
-}
-
-/**
- * The command that actually reaches a loopback install.
- *
- * Both sides on the same number on purpose: it is what makes the address in
- * the browser match FIRETOWER_PUBLIC_URL, and every preview link along with
- * it. The three options are not decoration —
- *
- *   * ServerAliveInterval/CountMax notice a dead forward in about a minute,
- *     instead of leaving a tunnel that looks up and answers nothing;
- *   * ExitOnForwardFailure makes "that port is already taken here" an error
- *     rather than an ssh session that connected and forwarded nothing.
- */
-export function tunnelCommand(port: number, destination?: string): string {
-  const target = destination ?? `${userOnThisMachine()}@${hostname()}`;
-
-  return (
-    `ssh -N -L ${port}:${LOOPBACK}:${port} ` +
-    `-o ServerAliveInterval=20 -o ServerAliveCountMax=3 ` +
-    `-o ExitOnForwardFailure=yes ${target}`
-  );
-}
-
-/**
- * A best guess at what to type, rather than a placeholder to fill in.
- *
- * Usually right on a VPS, and wrong in a way that is obvious when it is wrong
- * — which is better than `<user>@<host>`, because that has to be edited even
- * when the guess would have been correct.
- */
-function userOnThisMachine(): string {
-  return process.env.SUDO_USER ?? process.env.USER ?? userInfo().username;
-}
-
-export function certificate(reach: Reach): string {
-  if (reach.kind === "domain") return "yours, from ./certs — see the Caddyfile";
-  if (reach.kind === "proxy") return "yours — Firetower serves plain HTTP";
-
-  return "none — plain HTTP, on loopback only";
-}
-
-/**
- * What will actually be listening, and where.
- *
- * The bind is in the summary because it is the line that says whether this
- * machine's public address answers. It used to be neither shown nor chosen,
- * and "only from this machine" published on every interface.
- */
-export function published(reach: Reach, ports: Ports): string {
-  const control = ports.bindable
-    ? `${LOOPBACK}:${ports.http}`
-    : `every interface, on ${ports.http}`;
-
-  if (reach.kind === "domain") {
-    return `${control} — and Caddy on ${ports.https} and 80, for everyone else`;
-  }
-
-  return control;
-}
 
 async function askDirectory(): Promise<string> {
   const directory = await prompts.text({

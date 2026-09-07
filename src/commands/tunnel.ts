@@ -1,6 +1,6 @@
 import { execa } from "execa";
 import * as env from "../env.js";
-import { tunnelCommand } from "./install.js";
+import { tunnelCommand } from "../shape.js";
 import { ui, pc } from "../ui.js";
 
 /**

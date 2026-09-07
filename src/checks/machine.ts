@@ -54,12 +54,16 @@ export const ports: Check = {
   name: "ports",
   preflight: true,
   deployment: false,
-  async run({ httpPort = 80, httpsPort = 443 }) {
+  async run({ httpPort = 80, httpsPort = 443, heldPorts }) {
     const wanted = [...new Set([httpPort, httpsPort])];
     const name = `ports ${wanted.join(", ")}`;
 
     const busy: number[] = [];
     for (const port of wanted) {
+      // A port this deployment already publishes is one it is about to release,
+      // so it is not a conflict. Without this an upgrade reports its own
+      // control plane as the thing in the way.
+      if (heldPorts?.has(port)) continue;
       if (!(await docker.portIsFree(port))) busy.push(port);
     }
 

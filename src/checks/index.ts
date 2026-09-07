@@ -39,6 +39,11 @@ export interface Context {
    */
   httpPort?: number;
   httpsPort?: number;
+  /**
+   * Ports this deployment already publishes, which do not count as taken: it
+   * is about to be restarted and will release them.
+   */
+  heldPorts?: ReadonlySet<number>;
 }
 
 export function ok(name: string, detail?: string): Result {

@@ -109,6 +109,37 @@ function publishedPorts(compose: string): string[] {
 }
 
 /**
+ * Which service publishes a variable's port, or nothing if none does.
+ *
+ * This is how a re-purposed name is *detected* rather than guessed at. When
+ * `HTTP_PORT` moved from Caddy to the control plane it kept its name, kept its
+ * syntax, and changed what it described — and the only trace of that in the two
+ * files is which service's `ports:` entry mentions it.
+ *
+ * So an upgrade compares the answer before and after. Same service, and the
+ * operator's number still means what they chose; a different one, and it is a
+ * number about something else that must not be carried forward.
+ */
+export function portOwner(compose: string, variable: string): string | null {
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    return null;
+  }
+
+  for (const [name, service] of Object.entries(services)) {
+    const entries = Array.isArray(service.ports) ? service.ports : [];
+
+    if (entries.some((entry) => typeof entry === "string" && entry.includes(`\${${variable}`))) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Whether this compose file lets the operator choose the ports it publishes.
  *
  * Asked rather than assumed, because the CLI writes whatever compose file the
@@ -221,6 +252,59 @@ export function dormantRequiredVariables(compose: string, activeProfiles: string
   for (const name of requiredVariables(compose, activeProfiles)) dormant.delete(name);
 
   return [...dormant];
+}
+
+/**
+ * The services this deployment will actually have, profiles applied.
+ *
+ * The complement is what makes a container an orphan, so this is the list
+ * `upgrade` subtracts from what is on the machine. A service behind a profile
+ * that is off does not appear, which is the entire point: that is exactly the
+ * container Compose will leave running and never mention.
+ */
+export function createdServices(compose: string, activeProfiles: string[] = []): string[] {
+  const active = new Set(activeProfiles);
+
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    // A file we cannot parse gives no basis for calling anything an orphan,
+    // and the cost of guessing wrong here is removing somebody's container.
+    return [];
+  }
+
+  return Object.entries(services)
+    .filter(([, service]) => willBeCreated(service, active))
+    .map(([name]) => name);
+}
+
+/**
+ * Every profile named anywhere in the file.
+ *
+ * For the one operation that has to reach a service the deployment does not
+ * want: taking it down. `--remove-orphans` does not, because a profile-gated
+ * service is not an orphan — Compose knows it, it is simply not selected — so a
+ * `down` that leaves the profiles off walks straight past the Caddy still
+ * holding 80. Selecting every profile is what makes `down` mean the whole
+ * project.
+ */
+export function allProfiles(compose: string): string[] {
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    return [];
+  }
+
+  const found = new Set<string>();
+
+  for (const service of Object.values(services)) {
+    const profiles = Array.isArray(service.profiles) ? service.profiles : [];
+    for (const name of profiles) found.add(String(name));
+  }
+
+  return [...found];
 }
 
 /** Whether this deployment's profiles create this service at all. */
