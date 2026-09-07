@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.6.0...v0.7.0) (2026-09-07)
+
+
+### Features
+
+* give worker sessions a working docker ([99f48b5](https://github.com/firetower-cloud/firetower-cli/commit/99f48b5c96abc4db74f89117a5561a932f1ed27a))
+* give worker sessions a working docker ([f0d992d](https://github.com/firetower-cloud/firetower-cli/commit/f0d992d9587d3d4e8e9bb722f199af7c71653b0b))
+
+
+### Bug Fixes
+
+* do not trust a .env the compose file has already moved past ([e048950](https://github.com/firetower-cloud/firetower-cli/commit/e0489502d36268ca34108994042eb98edc31e9d9))
+
 ## [0.6.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.5.0...v0.6.0) (2026-09-07)
 
 
