@@ -225,6 +225,49 @@ workers
   });
 
 workers
+  .command("uninstall")
+  // What people type when they mean the same thing. `remove` reads as the
+  // opposite of `install` to some and `uninstall` to others, and neither of
+  // them should have to find out which one this CLI chose.
+  .alias("remove")
+  .description("remove this machine's worker and everything it holds")
+  .option("--container <name>", "which container", "firetower-worker")
+  // The image is shared with anything else on the machine built from it, and
+  // it is the one thing here that costs a pull rather than a loss.
+  .option("--keep-image", "leave the worker image on this machine")
+  .option("--dry-run", "list what would go, and stop")
+  .action(async (options) => {
+    await checkVersion();
+    await worker.uninstall({
+      container: options.container,
+      keepImage: options.keepImage,
+      dryRun: options.dryRun,
+      yes: globals().yes,
+    });
+  });
+
+workers
+  .command("reset")
+  .description("remove this machine's worker, then install a fresh one")
+  .option("--container <name>", "what to call it", "firetower-worker")
+  .option(
+    "--agents <list>",
+    "agents to install, comma separated — asked for when omitted",
+  )
+  .option("--no-docker", "do not run a Docker daemon inside the worker")
+  .option("--dry-run", "list what would go, and stop")
+  .action(async (options) => {
+    await checkVersion();
+    await worker.reset({
+      container: options.container,
+      agents: options.agents,
+      docker: options.docker,
+      dryRun: options.dryRun,
+      yes: globals().yes,
+    });
+  });
+
+workers
   .command("status")
   .description("what this machine's worker is running")
   .option("--container <name>", "which container", "firetower-worker")

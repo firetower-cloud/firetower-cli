@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { runArgs, saysDockerOff } from "../src/commands/worker/index.js";
+import {
+  runArgs,
+  saysDockerOff,
+  removalPlan,
+  isTheName,
+  type HostState,
+} from "../src/commands/worker/index.js";
+
+/** The image a worker is created from, spelled once here as it is there. */
+const IMAGE = "ghcr.io/firetower-cloud/firetower-worker:latest";
 
 /**
  * What a worker is created with.
@@ -127,5 +136,164 @@ describe("saysDockerOff", () => {
 
   it("reads an empty environment as on", () => {
     expect(saysDockerOff("")).toBe(false);
+  });
+});
+
+/**
+ * What an uninstall decides to remove.
+ *
+ * Pure, and tested without a daemon, because the two rules worth having are
+ * the ones a live host would only demonstrate by getting them wrong: the
+ * `firetower` volume is shared by every worker on the machine, and destroying
+ * it to uninstall one of them would take the other's worktrees too.
+ */
+
+const clean: HostState = {
+  container: { exists: false, running: false },
+  volumes: [],
+  image: false,
+  mounts: {},
+  imageUsers: [],
+};
+
+/** A machine with one worker on it, installed and running. */
+const installed: HostState = {
+  ...clean,
+  container: { exists: true, running: true },
+  volumes: ["firetower", "firetower-docker-firetower-worker"],
+  image: true,
+  mounts: { firetower: [], "firetower-docker-firetower-worker": [] },
+};
+
+const removed = (plan: { remove: { name: string }[] }) => plan.remove.map((i) => i.name);
+const kept = (plan: { kept: { name: string }[] }) => plan.kept.map((i) => i.name);
+
+describe("removalPlan", () => {
+  it("takes the container, both volumes and the image", () => {
+    expect(removed(removalPlan("firetower-worker", installed))).toEqual([
+      "firetower-worker",
+      "firetower",
+      "firetower-docker-firetower-worker",
+      IMAGE,
+    ]);
+  });
+
+  it("puts the container first, because a mounted volume cannot be removed", () => {
+    expect(removalPlan("firetower-worker", installed).remove[0]?.kind).toBe("container");
+  });
+
+  it("finds nothing on a machine that never had a worker", () => {
+    const plan = removalPlan("firetower-worker", clean);
+    expect(plan.remove).toEqual([]);
+    expect(plan.kept).toEqual([]);
+  });
+
+  it("sweeps the volumes of a half-finished install with no container", () => {
+    // The case the command exists for. Refusing here because the container is
+    // missing would refuse exactly when somebody needs it.
+    const plan = removalPlan("firetower-worker", {
+      ...installed,
+      container: { exists: false, running: false },
+    });
+
+    expect(removed(plan)).toEqual([
+      "firetower",
+      "firetower-docker-firetower-worker",
+      IMAGE,
+    ]);
+  });
+
+  it("keeps firetower when another worker mounts it", () => {
+    // The volume is a constant, not keyed to the container, so two workers
+    // share one — and this worker's uninstall is not the other one's.
+    const plan = removalPlan("firetower-worker", {
+      ...installed,
+      mounts: { ...installed.mounts, firetower: ["firetower-worker-2"] },
+    });
+
+    expect(removed(plan)).not.toContain("firetower");
+    expect(kept(plan)).toEqual(["firetower"]);
+    expect(plan.kept[0]?.because).toContain("firetower-worker-2");
+  });
+
+  it("still takes that worker's own cache when the shared volume stays", () => {
+    const plan = removalPlan("firetower-worker", {
+      ...installed,
+      mounts: { ...installed.mounts, firetower: ["firetower-worker-2"] },
+    });
+
+    expect(removed(plan)).toContain("firetower-docker-firetower-worker");
+  });
+
+  it("keeps the image when something else was built from it", () => {
+    const plan = removalPlan("firetower-worker", {
+      ...installed,
+      imageUsers: ["firetower-worker-2"],
+    });
+
+    expect(removed(plan)).not.toContain(IMAGE);
+    expect(kept(plan)).toEqual([IMAGE]);
+  });
+
+  it("leaves the image out entirely when asked to keep it", () => {
+    // Somebody who passed the flag does not need it explained back to them.
+    const plan = removalPlan("firetower-worker", installed, { keepImage: true });
+    expect(removed(plan)).not.toContain(IMAGE);
+    expect(kept(plan)).toEqual([]);
+  });
+
+  it("names the cache volume after the container it belongs to", () => {
+    const plan = removalPlan("second", {
+      ...installed,
+      volumes: ["firetower", "firetower-docker-second"],
+      mounts: { firetower: [], "firetower-docker-second": [] },
+    });
+
+    expect(removed(plan)).toContain("firetower-docker-second");
+  });
+
+  it("does not remove a volume that is not there", () => {
+    const plan = removalPlan("firetower-worker", { ...installed, volumes: ["firetower"] });
+    expect(removed(plan)).not.toContain("firetower-docker-firetower-worker");
+  });
+
+  it("says whether the container is running, because that is what dies", () => {
+    const stopped = removalPlan("firetower-worker", {
+      ...installed,
+      container: { exists: true, running: false },
+    });
+
+    expect(removalPlan("firetower-worker", installed).remove[0]?.note).toBe("running");
+    expect(stopped.remove[0]?.note).toBe("stopped");
+  });
+});
+
+describe("isTheName", () => {
+  const name = "firetower-worker";
+
+  it("accepts the name", () => {
+    expect(isTheName(name, name)).toBe(true);
+  });
+
+  it("refuses an empty answer, which is what a bare Enter sends", () => {
+    // The whole of the safeguard. The prompt carries no placeholder and no
+    // default precisely so that this is the value an accidental Enter has.
+    expect(isTheName("", name)).toBe(false);
+    expect(isTheName("   ", name)).toBe(false);
+  });
+
+  it("refuses a different container", () => {
+    expect(isTheName("firetower-worker-2", name)).toBe(false);
+    expect(isTheName("firetower", name)).toBe(false);
+  });
+
+  it("forgives the space that comes with a pasted name", () => {
+    expect(isTheName("  firetower-worker\t", name)).toBe(true);
+  });
+
+  it("does not forgive case, because Docker does not", () => {
+    // `Firetower-Worker` is a different container, and agreeing to remove it
+    // is not agreeing to remove this one.
+    expect(isTheName("Firetower-Worker", name)).toBe(false);
   });
 });
