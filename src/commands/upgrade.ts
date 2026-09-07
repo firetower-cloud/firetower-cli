@@ -106,7 +106,13 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
   //
   // Only when it buys something. `down` takes running agent sessions with it,
   // which a plain image bump has no business doing.
-  if (composeChanged || plan.changes.length > 0 || plan.orphans.length > 0) {
+  // `held` is this project's own published ports. If the port about to be bound
+  // is among them, something here is on it and `up` alone would recreate the
+  // control plane straight into `address already in use` — the reported error,
+  // raised against a container from the release being replaced.
+  const collides = held.has(plan.ports.http);
+
+  if (composeChanged || plan.changes.length > 0 || plan.orphans.length > 0 || collides) {
     // Every profile, not the ones this deployment wants. `--remove-orphans`
     // alone walks straight past the old Caddy: a profile-gated service is not
     // an orphan to Compose, just one it has not selected, so the container
@@ -118,6 +124,8 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
     );
     ui.ok("stopped", plan.orphans.length > 0 ? "including the containers above" : undefined);
   }
+
+  await clearForTakeoff(dir, plan);
 
   await docker.composeOrThrow({ dir, stream: true }, "pull");
   await docker.composeOrThrow({ dir }, "up", "-d");
@@ -154,6 +162,7 @@ interface Plan {
   /** The compose file as it is on disk now, which may not be the new one. */
   compose: string;
   reach: Reach;
+  /** Not readonly: `clearForTakeoff` moves this when the prediction was wrong. */
   ports: Ports;
   current: env.Env;
   next: env.Env;
@@ -231,6 +240,18 @@ async function keepablePorts(
   // A file with no `${HTTP_PORT}` on either side says nothing either way, and
   // guessing from an absence is how a port silently stops being honoured.
   if (!before || !after || before !== after) return {};
+
+  // Comparing the two files is not enough on its own, and this is the case it
+  // misses: an upgrade that replaced `firetower.yml` and then failed leaves the
+  // compose file migrated and `.env` untouched. Both sides of the comparison
+  // above are then the *new* file, they agree, and the stale number is kept —
+  // which is the failure this whole command exists to prevent, surviving into
+  // the fix for it.
+  //
+  // So ask the file instead of the history: a compose that reads `HTTP_BIND`
+  // against a `.env` that has never heard of it was written by an older world,
+  // and nothing in it describes this release.
+  if (services.bindIsConfigurable(deployment.compose) && !deployment.env.HTTP_BIND) return {};
 
   const http = port(deployment.env.HTTP_PORT);
   const https = port(deployment.env.HTTPS_PORT);
@@ -322,6 +343,47 @@ async function writeEnv(dir: string, plan: Plan): Promise<void> {
   await env.write(path, plan.next);
 
   ui.ok(path, "previous kept as .env.backup");
+}
+
+/**
+ * That the port really is free, now that everything meant to release it has.
+ *
+ * Everything above this point is a prediction: which containers would go, which
+ * ports they were holding, what would therefore be free. This is the one place
+ * that checks, and it runs at the only moment the answer is authoritative —
+ * after the `down`, before Compose binds anything.
+ *
+ * It exists because the prediction has been wrong. Treating a port as free
+ * because *this project* held it is right only if the container actually went,
+ * and an orphan that was never detected does not go. Compose's error for that
+ * names a container id and an errno; this names the port and moves off it.
+ */
+async function clearForTakeoff(dir: string, plan: Plan): Promise<void> {
+  if (!plan.ports.configurable) return;
+  if (await docker.portIsFree(plan.ports.http)) return;
+
+  const moved = await firstFreePort(plan.ports.http);
+
+  ui.blank();
+  ui.warn(
+    `something still answers on ${plan.ports.http}`,
+    `publishing on ${moved} instead — stop whatever holds it and re-run to move back`,
+  );
+
+  plan.ports = { ...plan.ports, http: moved };
+  plan.next = env.reshape(plan.next, derive(plan.reach, plan.ports));
+  plan.changes = env.changes(plan.current, plan.next);
+
+  await env.write(join(dir, ".env"), plan.next);
+  ui.ok(join(dir, ".env"), `HTTP_PORT is ${moved}`);
+}
+
+async function firstFreePort(from: number): Promise<number> {
+  for (let port = from + 1; port < from + 64; port++) {
+    if (await docker.portIsFree(port)) return port;
+  }
+
+  return from;
 }
 
 /**

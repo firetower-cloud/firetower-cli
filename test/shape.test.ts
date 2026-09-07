@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { infer, derive, choosePorts, type Ports, type Reach } from "../src/shape.js";
+import { infer, derive, choosePorts, ALTERNATE, type Ports, type Reach } from "../src/shape.js";
 import * as env from "../src/env.js";
 import * as services from "../src/services.js";
 import { hostPorts } from "../src/docker.js";
@@ -138,10 +138,16 @@ describe("derive", () => {
 describe("choosePorts", () => {
   it("moves a deployment off the port it was installed on when the meaning changed", async () => {
     // The regression. `HTTP_PORT=80` was Caddy's; on the current release the
-    // same name is the control plane's, and 8080 is what it should become.
+    // same name is the control plane's, and the answer is a high port.
+    //
+    // Not asserted as 8080 exactly: unattended selection walks up from there to
+    // something free, so pinning the number makes this test fail on any machine
+    // that happens to be running Firetower — including one running the release
+    // under test.
     const ports = await choosePorts({ kind: "local" }, CURRENT, { yes: true }, new Set([80, 443]));
 
-    expect(ports.http).toBe(8080);
+    expect(ports.http).not.toBe(80);
+    expect(ports.http).toBeGreaterThanOrEqual(ALTERNATE.http);
     expect(ports.bindable).toBe(true);
   });
 

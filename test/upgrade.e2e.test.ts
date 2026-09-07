@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as docker from "../src/docker.js";
 import * as env from "../src/env.js";
+import * as upstream from "../src/upstream.js";
 
 /**
  * Upgrading across a release that changed what a variable means.
@@ -34,8 +35,16 @@ const CLI = join(import.meta.dirname, "..", "dist", "cli.js");
  * *runs* Firetower, the teardown below would take the real deployment's
  * database volume with it. COMPOSE_PROJECT_NAME outranks the file's own name.
  */
-const PROJECT = "firetower-upgrade-e2e";
-process.env.COMPOSE_PROJECT_NAME = PROJECT;
+/**
+ * Set per test, not once for the file. Each case brings up a stack of its own,
+ * and one project name across both would have the second one adopting the
+ * first's containers and volumes — which is the same namespace collision this
+ * constant exists to prevent, moved inside the file.
+ */
+function isolate(name: string): string {
+  process.env.COMPOSE_PROJECT_NAME = name;
+  return name;
+}
 
 const cli = (...args: string[]): string[] => [CLI, "--skip-version-check", ...args];
 
@@ -103,18 +112,84 @@ volumes:
   caddy_config:
 `;
 
-let dir: string;
+const stacks: { dir: string; project: string }[] = [];
 
 afterAll(async () => {
-  if (!dir) return;
+  for (const { dir, project } of stacks) {
+    // The project each stack was created under, restored before taking it
+    // down — otherwise the last test's name is the one in the environment and
+    // the earlier stacks are never found, let alone removed.
+    process.env.COMPOSE_PROJECT_NAME = project;
 
-  await docker.compose({ dir }, "down", "-v", "--remove-orphans");
-  await rm(dir, { recursive: true, force: true });
+    await docker.compose({ dir, profiles: ["tls"] }, "down", "-v", "--remove-orphans");
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The state a failed upgrade leaves behind: compose migrated, `.env` not.
+ *
+ * This is what actually reached the operator. The first upgrade replaced
+ * `firetower.yml` and then died binding the port; the second ran the fix and
+ * failed the same way, because comparing the compose file before and after
+ * found the *new* file on both sides — they agreed, and the stale `HTTP_PORT`
+ * was kept as though it had been chosen on purpose.
+ *
+ * A `.env` with no `HTTP_BIND` against a compose file that reads one is the
+ * tell, and it needs no history to see.
+ */
+describe("upgrade, resumed after a failed one", () => {
+  it("does not trust a .env the compose file has already moved past", async () => {
+    const project = isolate("firetower-resume-e2e");
+    const resumed = await mkdtemp(join(tmpdir(), "firetower-resume-e2e-"));
+    stacks.push({ dir: resumed, project });
+
+    const rootKey = env.generateRootKey();
+
+    // The compose file of the release being moved to, already on disk.
+    const files = await upstream.deployment();
+    await writeFile(join(resumed, "firetower.yml"), files.compose);
+
+    // The `.env` of the release being moved from, never rewritten. No
+    // HTTP_BIND, because the release that wrote it had no such variable.
+    await env.write(join(resumed, ".env"), {
+      DOMAIN: "",
+      HTTP_PORT: "80",
+      HTTPS_PORT: "443",
+      FIRETOWER_PUBLIC_URL: "http://localhost",
+      POSTGRES_PASSWORD: env.generatePassword(),
+      FIRETOWER_ROOT_KEY: rootKey,
+      ADMIN_USERNAME: "admin",
+    });
+
+    const upgraded = await execa(
+      "node",
+      cli("--dir", resumed, "--yes", "upgrade", "--no-backup"),
+      { reject: false, stdio: "inherit" },
+    );
+    expect(upgraded.exitCode).toBe(0);
+
+    const after = await env.read(join(resumed, ".env"));
+
+    // **The bug.** 80 described Caddy's front door on the release this `.env`
+    // came from, and describes the vault's published port on this one.
+    expect(after?.HTTP_PORT).not.toBe("80");
+    expect(after?.HTTP_BIND).toBe("127.0.0.1");
+    expect(after?.FIRETOWER_PUBLIC_URL).toBe(`http://localhost:${after?.HTTP_PORT}`);
+    expect(after?.FIRETOWER_ROOT_KEY).toBe(rootKey);
+
+    const response = await fetch(`http://127.0.0.1:${after?.HTTP_PORT}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(response.status).toBeLessThan(500);
+  });
 });
 
 describe("upgrade", () => {
   it("re-derives a deployment whose variables changed meaning under it", async () => {
-    dir = await mkdtemp(join(tmpdir(), "firetower-upgrade-e2e-"));
+    const project = isolate("firetower-upgrade-e2e");
+    const dir = await mkdtemp(join(tmpdir(), "firetower-upgrade-e2e-"));
+    stacks.push({ dir, project });
 
     const rootKey = env.generateRootKey();
     const password = env.generatePassword();

@@ -255,8 +255,31 @@ export interface ProjectContainer {
   ports: number[];
 }
 
-/** Every container in this deployment's project, running or not, orphans too. */
+/**
+ * Every container in this deployment's project, running or not, orphans too.
+ *
+ * Two sources, unioned, because either can come back empty for a reason that
+ * has nothing to do with there being no containers. The label query needs a
+ * project name, and `projectName` asks Compose — which fails on a file it
+ * cannot interpolate. Compose's own `ps` needs no name but has been known to
+ * omit a container whose service is no longer selected.
+ *
+ * An empty answer here is not harmless: it reads as "no orphans", and the
+ * container it missed is the one still holding the port the control plane is
+ * about to want. Asking twice is cheap; missing it is the reported failure.
+ */
 export async function projectContainers(options: ComposeOptions): Promise<ProjectContainer[]> {
+  const found = new Map<string, ProjectContainer>();
+
+  for (const container of await byLabel(options)) found.set(container.name, container);
+  for (const container of await byCompose(options)) {
+    if (!found.has(container.name)) found.set(container.name, container);
+  }
+
+  return [...found.values()];
+}
+
+async function byLabel(options: ComposeOptions): Promise<ProjectContainer[]> {
   const project = await projectName(options);
   if (!project) return [];
 
@@ -277,6 +300,50 @@ export async function projectContainers(options: ComposeOptions): Promise<Projec
       const [name = "", service = "", ports = ""] = line.split("\t");
       return { name, service, ports: hostPorts(ports) };
     });
+}
+
+interface PsRow {
+  Name?: string;
+  Service?: string;
+  Publishers?: { PublishedPort?: number }[];
+}
+
+/** Compose's own view, for when the project name could not be resolved. */
+async function byCompose(options: ComposeOptions): Promise<ProjectContainer[]> {
+  const result = await compose(options, "ps", "--all", "--format", "json");
+  if (result.exitCode !== 0) return [];
+
+  const text = String(result.stdout).trim();
+  if (!text) return [];
+
+  let rows: PsRow[];
+  try {
+    // Compose emits one object per line on some versions and an array on
+    // others, and an unparsed array yields no rows — which is exactly the
+    // silent empty answer this function exists to avoid.
+    rows = text.startsWith("[")
+      ? (JSON.parse(text) as PsRow[])
+      : text
+          .split("\n")
+          .filter((line) => line.trim())
+          .map((line) => JSON.parse(line) as PsRow);
+  } catch {
+    return [];
+  }
+
+  return rows
+    .filter((row) => row.Name)
+    .map((row) => ({
+      name: row.Name ?? "",
+      service: row.Service ?? "",
+      ports: [
+        ...new Set(
+          (row.Publishers ?? [])
+            .map((publisher) => publisher.PublishedPort)
+            .filter((port): port is number => typeof port === "number" && port > 0),
+        ),
+      ],
+    }));
 }
 
 /**
