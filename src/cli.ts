@@ -176,11 +176,16 @@ workers
     "--agents <list>",
     "agents to install, comma separated — asked for when omitted",
   )
+  // A worker runs its sessions' own stacks — compose, a database — which needs
+  // a privileged container, and a privileged container can become root on this
+  // machine. That is the trade a worker already is; this is how to decline it.
+  .option("--no-docker", "do not run a Docker daemon inside the worker")
   .action(async (options) => {
     await checkVersion();
     await worker.install({
       container: options.container,
       agents: options.agents,
+      docker: options.docker,
       yes: globals().yes,
     });
   });
@@ -203,9 +208,20 @@ workers
   .command("upgrade")
   .description("upgrade this machine's worker, once its host is drained")
   .option("--container <name>", "which container", "firetower-worker")
+  // Both halves, deliberately. A lone `--no-docker` would default the value to
+  // true, and `upgrade` has to tell "turn it on" from "leave it as it is" —
+  // declaring its opposite too is what leaves it undefined until somebody
+  // types one. Without that, the first upgrade of a worker installed with
+  // `--no-docker` would silently make it privileged.
+  .option("--docker", "run a Docker daemon inside the worker")
+  .option("--no-docker", "do not run a Docker daemon inside the worker")
   .action(async (options) => {
     await checkVersion();
-    await worker.upgrade({ container: options.container, yes: globals().yes });
+    await worker.upgrade({
+      container: options.container,
+      docker: options.docker,
+      yes: globals().yes,
+    });
   });
 
 workers
