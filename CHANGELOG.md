@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.7.0...v0.8.0) (2026-09-07)
+
+
+### Features
+
+* **worker:** uninstall, remove, and reset commands ([dc32eeb](https://github.com/firetower-cloud/firetower-cli/commit/dc32eeb027a5cf4e4bf3ca472a42445180818293))
+* **worker:** uninstall, remove, and reset commands ([5a35f42](https://github.com/firetower-cloud/firetower-cli/commit/5a35f425c7ee726c324475caf473dbd5697aaff6))
+
 ## [0.7.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.6.0...v0.7.0) (2026-09-07)
 
 
