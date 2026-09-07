@@ -131,6 +131,8 @@ firetower uninstall            tear it down, asking separately about volumes
 
 firetower worker install       install a worker on THIS machine
 firetower worker upgrade       drain-aware worker upgrade
+firetower worker uninstall     remove it, and everything it holds
+firetower worker reset         remove it, then install a fresh one
 firetower worker status
 
 firetower --version            this CLI's version, and the deployed one
@@ -142,6 +144,19 @@ unattended runs, `--json` on any command that answers a question.
 `install` flags: `--domain`, `--public-url`, `--http-port`, `--https-port`,
 `--admin-username`, `--acme-email`. Each of the first two names one of the three
 shapes above, so there is no combination to reconcile.
+
+`worker uninstall` (also `worker remove`) takes the container, both named
+volumes and the image — the worktrees, every uncommitted change in them, the
+agents and the whole nested-Docker cache. It asks for the container's name
+typed out rather than a `y/N`, because there is nothing left afterwards to put
+any of it back from. `--dry-run` lists what would go and stops; `--keep-image`
+leaves the image, which is the one thing on that list a pull brings back.
+
+Two things it will not do. The `firetower` volume is shared by every worker on
+the machine, so where a second one mounts it the volume stays and the command
+says why. The image stays too where another container was built from it.
+`worker reset` is the same removal — the image cache included, since a reset
+that kept it would be a reset with a qualifier — followed by an install.
 
 `tunnel` flags: `--local-port` when the remote port is taken on your machine,
 `--remote-port` to skip reading the remote `.env`, `--ssh-config` to print a

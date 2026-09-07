@@ -299,16 +299,45 @@ export async function agents(options: WorkerOptions & { add?: string; remove?: s
   ui.blank();
 }
 
-export async function install(options: WorkerOptions): Promise<void> {
-  const name = options.container ?? DEFAULT_NAME;
-  ui.title("Firetower worker");
-
+/**
+ * That the daemon answers, and that this account is allowed to ask.
+ *
+ * Every command below shells out to it, and "docker is unreachable" said once
+ * at the top reads far better than the same thing said by whichever call
+ * happened to be first.
+ */
+async function requireDaemon(): Promise<void> {
   const daemon = await docker.daemon();
   if (!daemon.ok) {
     ui.fail(daemon.message ?? "docker is unreachable", daemon.remedy);
     ui.blank();
     process.exit(1);
   }
+}
+
+export async function install(options: WorkerOptions): Promise<void> {
+  ui.title("Firetower worker");
+  await performInstall(options.container ?? DEFAULT_NAME, options);
+}
+
+/**
+ * The install itself, without the heading.
+ *
+ * `reset` runs this as its second half, and a command that prints two titles
+ * reads as two commands that happened to be typed together.
+ */
+async function performInstall(
+  name: string,
+  options: WorkerOptions,
+  /**
+   * Which ending this is. A first install has to be registered in Firetower;
+   * a reset is the host Firetower already knows, under the same name and at
+   * the same address, and telling somebody to add it again would have them
+   * add it twice.
+   */
+  ending: "add" | "undrain" = "add",
+): Promise<void> {
+  await requireDaemon();
 
   if (await docker.containerExists(name)) {
     ui.fail(`a container called ${name} already exists`, "firetower worker upgrade");
@@ -344,6 +373,17 @@ export async function install(options: WorkerOptions): Promise<void> {
   if (wanted.length > 0) {
     ui.blank();
     await addAgents(name, wanted);
+  }
+
+  if (ending === "undrain") {
+    ui.notice([
+      "The worker is back, and empty.",
+      "",
+      "It is the host Firetower already knows — same container, same",
+      "address — so there is nothing to add. Undrain it to give it",
+      "work again: Compute → this host → Undrain.",
+    ]);
+    return;
   }
 
   // Firetower will be this account. If it cannot reach Docker, the host is
@@ -480,4 +520,420 @@ export async function status(options: WorkerOptions & { json?: boolean }): Promi
 
   ui.ok(name, version ?? "running, version unknown");
   ui.blank();
+}
+
+/**
+ * What a worker leaves on a machine, read off the daemon in one go.
+ *
+ * Separated from the decision about what to remove because the two rules that
+ * matter are ones nobody would think to check against a live host: `firetower`
+ * is shared by every worker on the machine, and the image is shared with
+ * anything else built from it.
+ */
+export interface HostState {
+  container: { exists: boolean; running: boolean };
+  /** Which of the worker's named volumes are actually on this machine. */
+  volumes: readonly string[];
+  /** Whether the worker image is on this machine. */
+  image: boolean;
+  /**
+   * Containers other than the one being removed that mount a given volume,
+   * keyed by volume name. Absent means nothing else mounts it.
+   */
+  mounts: Readonly<Record<string, readonly string[]>>;
+  /** Containers other than this one that were created from the worker image. */
+  imageUsers: readonly string[];
+}
+
+export interface Item {
+  kind: "container" | "volume" | "image";
+  name: string;
+  /** What it holds, for somebody reading the list before they agree to it. */
+  note: string;
+}
+
+export interface Plan {
+  remove: Item[];
+  /** Found, and deliberately left, with the reason to print underneath. */
+  kept: (Item & { because: string })[];
+}
+
+/**
+ * Everything of this worker's that is on this machine, and which of it can go.
+ *
+ * **`firetower` is the one to be careful with.** `VOLUME` is a constant rather
+ * than something keyed to the container, so two workers on one machine mount
+ * the same volume — and removing it would take the other worker's worktrees
+ * and uncommitted changes with it. Somebody uninstalling *this* worker did not
+ * ask for that, so the volume stays and the reason is printed.
+ *
+ * Nothing here reaches into the worker's own Docker daemon, and it does not
+ * have to: every image and volume a session built lives inside
+ * `firetower-docker-<name>`, and removing that volume takes all of it.
+ */
+export function removalPlan(
+  name: string,
+  host: HostState,
+  options: { keepImage?: boolean } = {},
+): Plan {
+  const plan: Plan = { remove: [], kept: [] };
+
+  if (host.container.exists) {
+    plan.remove.push({
+      kind: "container",
+      name,
+      note: host.container.running ? "running" : "stopped",
+    });
+  }
+
+  const volumes = [
+    { name: VOLUME, note: "worktrees, agents", shared: "worktrees are on it" },
+    { name: cacheVolume(name), note: "image cache", shared: "its cache is on it" },
+  ];
+
+  for (const volume of volumes) {
+    if (!host.volumes.includes(volume.name)) continue;
+
+    const others = host.mounts[volume.name] ?? [];
+    const item = { kind: "volume" as const, name: volume.name, note: volume.note };
+
+    if (others.length > 0) {
+      plan.kept.push({
+        ...item,
+        because: `also mounted by ${others.join(", ")}, whose ${volume.shared}`,
+      });
+    } else {
+      plan.remove.push(item);
+    }
+  }
+
+  // Left out entirely rather than reported as kept when somebody passed
+  // `--keep-image`: they said so, and a line explaining their own flag back to
+  // them is noise.
+  if (host.image && !options.keepImage) {
+    // No note. The ref is 47 characters wide and self-explanatory, and
+    // padding the rows above out to it would push their notes off an
+    // 80-column terminal.
+    const item = { kind: "image" as const, name: IMAGE, note: "" };
+
+    if (host.imageUsers.length > 0) {
+      plan.kept.push({ ...item, because: `still used by ${host.imageUsers.join(", ")}` });
+    } else {
+      plan.remove.push(item);
+    }
+  }
+
+  return plan;
+}
+
+/**
+ * A list of names out of Docker.
+ *
+ * A query that fails is not an empty answer. "Nothing else mounts this volume"
+ * is what decides whether another worker's worktrees survive, and inferring it
+ * from a daemon that did not answer is how that decision gets made wrongly.
+ */
+async function names(...args: string[]): Promise<string[]> {
+  const result = await docker.docker(...args);
+
+  if (result.exitCode !== 0) {
+    throw new docker.DockerError(
+      "could not read what else is on this machine",
+      `${result.stderr ?? ""}`.trim(),
+    );
+  }
+
+  return String(result.stdout ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/** Whether a named volume is on this machine. Exactly, not by prefix. */
+async function volumeExists(volume: string): Promise<boolean> {
+  const result = await docker.docker("volume", "inspect", volume);
+  return result.exitCode === 0;
+}
+
+/** Containers mounting a volume, minus the one that is about to be removed. */
+async function mounting(volume: string, except: string): Promise<string[]> {
+  const found = await names(
+    "ps", "-a", "--filter", `volume=${volume}`, "--format", "{{.Names}}",
+  );
+  return found.filter((container) => container !== except);
+}
+
+async function hostState(name: string): Promise<HostState> {
+  const exists = await docker.containerExists(name);
+
+  const running = exists
+    ? String(
+        (await docker.docker("inspect", "-f", "{{.State.Running}}", name)).stdout,
+      ).trim() === "true"
+    : false;
+
+  const cache = cacheVolume(name);
+  const volumes: string[] = [];
+  const mounts: Record<string, readonly string[]> = {};
+
+  for (const volume of [VOLUME, cache]) {
+    if (!(await volumeExists(volume))) continue;
+    volumes.push(volume);
+    mounts[volume] = await mounting(volume, name);
+  }
+
+  const image = (await docker.docker("image", "inspect", IMAGE)).exitCode === 0;
+
+  // `ancestor` rather than an exact image field, so a container somebody built
+  // *from* the worker image counts as a user of it too.
+  const imageUsers = image
+    ? (
+        await names("ps", "-a", "--filter", `ancestor=${IMAGE}`, "--format", "{{.Names}}")
+      ).filter((container) => container !== name)
+    : [];
+
+  return { container: { exists, running }, volumes, image, mounts, imageUsers };
+}
+
+/** The inventory, printed before anything is removed. */
+function show(plan: Plan): void {
+  // Measured across the rows that have something to say, so that the image —
+  // which does not — cannot widen the column it is not in.
+  const width = Math.max(
+    0,
+    ...plan.remove.filter((item) => item.note).map((item) => item.name.length),
+  );
+
+  ui.step("This will be removed:");
+  ui.blank();
+  for (const item of plan.remove) {
+    const line = `  ${item.kind.padEnd(10)} ${item.name.padEnd(width)}  ${pc.dim(item.note)}`;
+    ui.step(line.trimEnd());
+  }
+
+  if (plan.kept.length > 0) {
+    ui.blank();
+    for (const item of plan.kept) {
+      ui.warn(`kept ${item.kind} ${item.name}`, item.because);
+    }
+  }
+
+  // No trailing blank: every caller follows this with a notice, which opens
+  // with one of its own.
+}
+
+/**
+ * Removed in this order because Docker will not do it in any other: a volume
+ * cannot go while a container mounts it, and an image cannot go while a
+ * container made from it still exists.
+ */
+const ORDER = { container: 0, volume: 1, image: 2 } as const;
+
+/**
+ * Do it, reporting each failure and carrying on.
+ *
+ * Stopping at the first one would leave a machine halfway through an uninstall
+ * — which is the state somebody least wants to be left in, and exactly the one
+ * they would have to run this command again to get out of.
+ */
+async function execute(plan: Plan): Promise<void> {
+  let failed = false;
+
+  for (const item of [...plan.remove].sort((a, b) => ORDER[a.kind] - ORDER[b.kind])) {
+    // `--volumes` on the container takes its *anonymous* volumes with it, which
+    // is how the dangling `/var/lib/docker` older CLIs left behind on every
+    // upgrade finally gets collected. Named volumes are listed above and go on
+    // their own.
+    const args =
+      item.kind === "container"
+        ? ["rm", "-f", "--volumes", item.name]
+        : item.kind === "volume"
+          ? ["volume", "rm", item.name]
+          : ["rmi", item.name];
+
+    const result = await docker.docker(...args);
+
+    if (result.exitCode !== 0) {
+      ui.fail(`could not remove ${item.kind} ${item.name}`, `${result.stderr ?? ""}`.trim());
+      failed = true;
+      continue;
+    }
+
+    ui.ok("removed", `${item.kind} ${item.name}`);
+  }
+
+  if (failed) {
+    ui.blank();
+    process.exit(1);
+  }
+}
+
+/**
+ * Whether what somebody typed is the name.
+ *
+ * Its own function, and tested, because it is the whole of the safeguard: an
+ * empty answer must not match, which is also why the prompt above carries no
+ * placeholder and no default for a bare Enter to pick up.
+ *
+ * Surrounding space is forgiven — it comes from pasting the name out of
+ * `docker ps` — and nothing else is. Case is not: container names are
+ * case-sensitive to Docker, so `Firetower-Worker` is a different container and
+ * accepting it would be agreeing to remove something else.
+ */
+export function isTheName(typed: string, name: string): boolean {
+  return typed.trim() === name;
+}
+
+/**
+ * The gate in front of losing everything.
+ *
+ * The container's name, typed, rather than a y/N. `upgrade` already spends a
+ * y/N on "the host is drained" and this is the strictly worse thing to get
+ * wrong by one keystroke: there is no volume left afterwards to put anything
+ * back from. No placeholder either — an empty answer must never match.
+ */
+async function confirmByName(name: string, verb: string): Promise<void> {
+  const typed = await prompts.text({
+    message: `Type ${pc.bold(name)} to ${verb} it`,
+    validate: (value) =>
+      isTheName(value, name) ? undefined : `type ${name} exactly, or press Ctrl-C to stop`,
+  });
+
+  if (prompts.isCancel(typed)) {
+    ui.dim("nothing was changed");
+    ui.blank();
+    process.exit(1);
+  }
+}
+
+/** `--yes`, a typed name, or a refusal — never a prompt nobody can answer. */
+async function agree(name: string, verb: string, options: UninstallOptions): Promise<void> {
+  if (options.yes) return;
+
+  if (!process.stdin.isTTY) {
+    ui.fail(
+      "this removes everything the worker holds, and there is nobody here to confirm it",
+      "re-run with --yes",
+    );
+    ui.blank();
+    process.exit(1);
+  }
+
+  await confirmByName(name, verb);
+}
+
+export interface UninstallOptions extends WorkerOptions {
+  /** Leave the image alone. It is shared, and re-pulling it costs a minute. */
+  keepImage?: boolean;
+  /** Print what would go, and stop. */
+  dryRun?: boolean;
+}
+
+/**
+ * Everything of this worker's, off this machine.
+ *
+ * Idempotent on purpose. A host where the container is already gone still gets
+ * swept for the volumes and the image, and exits 0 — a half-finished install
+ * is the one case somebody actually needs this command for, and refusing to
+ * clean up because the container is missing would refuse exactly then.
+ */
+export async function uninstall(options: UninstallOptions): Promise<void> {
+  const name = options.container ?? DEFAULT_NAME;
+  ui.title("Firetower worker");
+  await requireDaemon();
+
+  const plan = removalPlan(name, await hostState(name), options);
+
+  if (plan.remove.length === 0) {
+    for (const item of plan.kept) ui.warn(`kept ${item.kind} ${item.name}`, item.because);
+    ui.ok("nothing to remove", `no worker called ${name} on this machine`);
+    ui.blank();
+    return;
+  }
+
+  if (plan.remove.some((item) => item.kind === "container")) {
+    ui.dim(`${name}   ${(await workerVersion(name)) ?? "unknown"}`);
+    ui.blank();
+  }
+  show(plan);
+
+  ui.notice([
+    pc.yellow("The container and the volumes cannot be put back."),
+    "",
+    "Every session on this host dies with the container: the tmux",
+    "server goes with it. Every worktree, every uncommitted change",
+    "and every agent installed here goes with the volume.",
+    "",
+    "Drain this host in Firetower first, and wait: Compute → this",
+    "host → Drain. This CLI cannot check for you — the worker",
+    "machine holds no credential for the control plane.",
+  ]);
+
+  if (options.dryRun) {
+    ui.dim("--dry-run: nothing was removed");
+    ui.blank();
+    return;
+  }
+
+  await agree(name, "remove", options);
+  await execute(plan);
+
+  ui.notice([
+    plan.kept.length === 0
+      ? "Nothing of the worker is left on this machine."
+      : "The worker is gone. What it shared with another one stayed.",
+    "",
+    "Remove the host in Firetower too: Compute → this host →",
+    "Remove. It stays listed, and unreachable, until you do.",
+  ]);
+}
+
+/**
+ * Off this machine, then back on it, empty.
+ *
+ * The image cache goes with everything else — a reset that kept it would be a
+ * reset with a qualifier, and the whole reason to type this word rather than
+ * `upgrade` is to get a machine with nothing on it.
+ */
+export async function reset(options: UninstallOptions): Promise<void> {
+  const name = options.container ?? DEFAULT_NAME;
+  ui.title("Firetower worker");
+  await requireDaemon();
+
+  const plan = removalPlan(name, await hostState(name), options);
+
+  if (plan.remove.length === 0) {
+    ui.ok("nothing to remove", `no worker called ${name} on this machine`);
+  } else {
+    if (plan.remove.some((item) => item.kind === "container")) {
+      ui.dim(`${name}   ${(await workerVersion(name)) ?? "unknown"}`);
+      ui.blank();
+    }
+    show(plan);
+
+    ui.notice([
+      pc.yellow("A reset is an uninstall, and then an install."),
+      "",
+      "Everything above goes first — worktrees, uncommitted changes,",
+      "agents and the image cache — and the worker that replaces it",
+      "starts empty. The worktrees do not come back.",
+      "",
+      "Drain this host in Firetower first, and wait: Compute → this",
+      "host → Drain.",
+    ]);
+  }
+
+  if (options.dryRun) {
+    ui.dim("--dry-run: nothing was removed, and nothing was installed");
+    ui.blank();
+    return;
+  }
+
+  if (plan.remove.length > 0) {
+    await agree(name, "reset", options);
+    await execute(plan);
+  }
+
+  ui.title("Installing");
+  await performInstall(name, options, "undrain");
 }
