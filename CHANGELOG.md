@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.5.0...v0.6.0) (2026-09-07)
+
+
+### Features
+
+* re-derive the deployment on upgrade ([3fe736b](https://github.com/firetower-cloud/firetower-cli/commit/3fe736b4a6ca0ce5a0a62d00c258ebe27e73f50c))
+
 ## [0.5.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.4.0...v0.5.0) (2026-09-06)
 
 
