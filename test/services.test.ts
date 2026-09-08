@@ -75,7 +75,64 @@ describe("requiredVariables", () => {
   });
 
   it("asks for it once that profile is turned on", () => {
-    expect(services.requiredVariables(COMPOSE, ["tls"])).toContain("DOMAIN");
+    // On a fixture rather than the real file, because the real file no longer
+    // has a required variable behind a profile — see below. The mechanism has
+    // to keep working for the next release that adds one.
+    expect(services.requiredVariables(GATED, ["tls"])).toContain("DOMAIN");
+  });
+
+  it("finds nothing profile-gated in the compose file this CLI writes", () => {
+    // Deliberate, and the reason is Compose's own behaviour: it interpolates
+    // the whole file before it decides which profiles are on, so a `${X:?…}`
+    // inside a profile fires with that profile off. One of them was enough to
+    // stop a bare `docker compose up -d` on the default install — the shape
+    // that never creates a proxy at all.
+    //
+    // The proxy still refuses to start without DOMAIN, DNS_PROVIDER and a
+    // token. It refuses in its own entrypoint, where the check runs only when
+    // the container does, and names all of them at once.
+    expect(services.requiredVariables(COMPOSE, ["tls"])).toEqual(["POSTGRES_PASSWORD"]);
+  });
+});
+
+/** A profile-gated required variable, which the real file no longer has. */
+const GATED = `
+name: firetower
+services:
+  firetower:
+    image: ghcr.io/firetower-cloud/firetower:latest
+  caddy:
+    profiles: [tls]
+    image: firetower-caddy
+    environment:
+      DOMAIN: \${DOMAIN:?set DOMAIN in .env}
+`;
+
+describe("obtainsCertificates", () => {
+  it("is true for the compose file this CLI writes", () => {
+    expect(services.obtainsCertificates(COMPOSE)).toBe(true);
+  });
+
+  it("is false for a release that terminates TLS with a certificate you supply", () => {
+    // The failure it prevents: `install` asks for a DNS provider and a token,
+    // writes both into `.env`, and starts a Caddy that reads neither — leaving
+    // somebody certain they configured automatic renewal that was never going
+    // to happen.
+    const older = `
+name: firetower
+services:
+  caddy:
+    profiles: [tls]
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: \${DOMAIN:-}
+`;
+
+    expect(services.obtainsCertificates(older)).toBe(false);
+  });
+
+  it("does not claim the capability for a file it cannot read", () => {
+    expect(services.obtainsCertificates("services: [this is not a mapping")).toBe(false);
   });
 });
 
@@ -83,15 +140,23 @@ describe("dormantRequiredVariables", () => {
   it("finds what Compose demands for a service it will not create", () => {
     // The failure this exists for. Profiles decide which containers are
     // created, not which variables are interpolated — so `docker compose pull`
-    // in a default install used to stop on the proxy's DOMAIN, naming a
-    // container that was never going to exist.
-    expect(services.dormantRequiredVariables(COMPOSE)).toEqual(["DOMAIN"]);
+    // in a default install stopped on the proxy's DOMAIN, naming a container
+    // that was never going to exist.
+    expect(services.dormantRequiredVariables(GATED)).toEqual(["DOMAIN"]);
   });
 
   it("is empty once that profile is on, because then it is a real question", () => {
     // Answered by `missingVariables` at that point, and asked of the operator.
     // A placeholder here would be a certificate served for a name nobody chose.
-    expect(services.dormantRequiredVariables(COMPOSE, ["tls"])).toEqual([]);
+    expect(services.dormantRequiredVariables(GATED, ["tls"])).toEqual([]);
+  });
+
+  it("has nothing to do for the compose file this CLI writes", () => {
+    // The placeholder is a workaround, and the file it was working around has
+    // stopped needing it: the proxy's checks moved into its entrypoint, so a
+    // bare `docker compose up -d` in a default install now works on its own.
+    // The machinery stays for the next release that reaches for `${X:?…}`.
+    expect(services.dormantRequiredVariables(COMPOSE)).toEqual([]);
   });
 
   it("leaves a variable a live service also insists on alone", () => {

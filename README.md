@@ -62,33 +62,103 @@ recommends 8080 rather than 80.
 ### On a name, over HTTPS
 
 For when a tunnel each is not reasonable — several people, on a network they
-already share. Caddy terminates TLS in front of Firetower with a certificate
-**you supply**, and the name never has to be reachable from the internet.
+already share. Caddy terminates TLS in front of Firetower with a certificate it
+**obtains and renews itself**, and the name never has to be reachable from the
+internet.
 
 ```sh
-firetower install --domain firetower.example.com
+firetower install --domain firetower.example.com \
+  --dns-provider cloudflare --dns-token "$CLOUDFLARE_TOKEN"
 ```
+
+Interactively, `install` asks for the provider and the token instead.
+
+It works without exposing anything because of *how* the certificate is
+obtained. The usual ACME challenges have Let's Encrypt connect **to you**, and a
+machine Let's Encrypt can reach is a machine anyone can reach — with every git
+token, every agent credential and the root key behind it. DNS-01 proves control
+the other way round: Caddy writes a TXT record through your provider's API and
+the authority reads it back out of DNS. Every connection is outbound.
+
+It is also the only challenge that can issue a **wildcard**, which this needs
+twice over: previews are served on subdomains, and one wildcard keeps every
+preview hostname out of the public Certificate Transparency logs — where a
+hostname that *is* the credential for that preview does not belong.
 
 Four things go with it:
 
-1. A certificate at `certs/fullchain.pem` and `certs/privkey.pem` in the install
-   directory. It must cover **both** `firetower.example.com` and
-   `*.firetower.example.com` — previews are served on subdomains, so a
-   bare-name certificate leaves them broken. Mint it wherever your DNS
-   credentials already live and copy the result in; the credential never
-   touches the server.
+1. **DNS_PROVIDER is compiled into Caddy.** Caddy resolves DNS providers as
+   compiled-in modules, so the `tls` profile builds its own image. The first
+   `up` pulls a Go toolchain and takes a few minutes rather than seconds, and
+   needs a reachable Go module proxy at that moment. It is cached afterwards.
 2. Both names in DNS, pointing at this machine. A private address is the right
-   answer:
+   answer, and the wildcard is not optional:
 
    ```
    firetower.example.com     A   10.0.0.5
    *.firetower.example.com   A   10.0.0.5
    ```
 
+   `firetower doctor` probes a random label under the domain to tell a wildcard
+   record apart from a single one that happens to exist.
 3. `install` writes `COMPOSE_PROFILES=tls`, which is what creates the Caddy
    container at all. Without it there is no proxy.
-4. **Renewal is yours.** Nothing here obtains the certificate, so nothing here
-   renews it. `firetower doctor` warns when there are under three weeks left.
+4. **Renewal is Caddy's**, unattended, at about two-thirds of the certificate's
+   life. `firetower doctor` reports the expiry and says who is responsible for
+   it.
+
+**Every** module under [github.com/caddy-dns](https://github.com/caddy-dns)
+works — all ninety-odd of them — and the CLI knows their names. The interactive
+prompt lists the dozen that take a single API token and lets you type any of the
+rest; both the prompt and `--dns-provider` reject a name that is not one of
+them, and suggest the closest:
+
+```
+$ firetower install --domain ft.example.com --dns-provider cloudflares
+error: option '--dns-provider <module>' argument 'cloudflares' is invalid.
+       no caddy-dns module called cloudflares — did you mean cloudflare?
+```
+
+That check earns its keep because the value is *compiled in*: an unchecked typo
+does not fail at start-up with a bad credential, it fails several minutes into a
+Go build, after every other question has been answered.
+
+A full module path — `github.com/libdns/something` — is always accepted, for a
+provider that is not under caddy-dns or one added since your CLI was published.
+
+Route 53, Azure, Google Cloud, Namecheap, Porkbun, OVH and about forty others
+need several values and cannot be expressed by the Caddyfile's one-line form.
+Choose them anyway, so the right module is built in, and write the provider
+block by hand in the `Caddyfile`; the CLI warns when you pick one.
+`firetower upgrade` rewrites `firetower.yml` and never touches the `Caddyfile`,
+so the edit survives.
+
+One caveat worth stating plainly: the CLI validates provider **names**, not that
+a module currently compiles. A caddy-dns module can be held back by something it
+depends on — `caddy-dns/vercel` is, today — and that surfaces as a Go build
+error minutes in. `DNS_MODULE_REPLACE` in `.env` is the way past it, and the CLI
+fills it in for the cases it knows about:
+
+```
+DNS_MODULE_REPLACE=github.com/libdns/vercel=github.com/libdns/vercel@v0.1.0
+```
+
+Delete that line once the module's maintainer tags a release.
+
+#### Bringing your own certificate
+
+For a corporate CA, a provider with no Caddy module, or a machine that cannot
+reach a Go module proxy:
+
+```sh
+firetower install --domain firetower.example.com
+```
+
+`--domain` without `--dns-provider` means exactly what it always did — a
+certificate you supply. Put `fullchain.pem` and `privkey.pem` in `certs/`,
+covering both the name and `*.the-name`, and uncomment the `tls` line in the
+`Caddyfile`. Nothing renews it for you, and `firetower doctor` warns when there
+are under three weeks left.
 
 ### Behind a reverse proxy you already run
 
@@ -102,6 +172,27 @@ firetower install --public-url https://firetower.example.com --http-port 8080
 
 Firetower then serves plain HTTP on `127.0.0.1:8080` for your proxy to pass
 through to.
+
+### Changing your mind later
+
+`install` makes a deployment; it does not edit one. To put an existing
+deployment on a name — the usual case, a month after installing it on loopback
+because a second person now needs it — use `firetower domain`:
+
+```sh
+firetower domain firetower.example.com          # asks for the provider and token
+firetower domain firetower.example.com --dns-provider cloudflare --dns-token "$TOKEN"
+firetower domain --none                         # back to loopback again
+```
+
+With no arguments it asks the same question `install` does, so it also moves a
+deployment behind your own reverse proxy, or back.
+
+It changes nothing about the release: no images are pulled, no migrations run,
+no database is touched. It recomputes the values in `.env` that follow from the
+answer, shows you the diff — with the API token masked — and recreates the
+containers that have to read them. Going back removes the Caddy container
+rather than leaving it running on 443, which a plain `up -d` would.
 
 ### Older releases
 
@@ -120,6 +211,7 @@ installing onto. Node comes with npm, which you needed to install this.
 
 ```
 firetower install              install the control plane on this machine
+firetower domain [name]        change how it is reached — add or remove a name
 firetower tunnel <dest>        forward a loopback control plane to your machine
 firetower upgrade              upgrade it, then report which workers lag
 firetower status               version, health, hosts, worker drift
@@ -141,8 +233,9 @@ firetower --version            this CLI's version, and the deployed one
 Global flags: `--dir <path>` (remembered after `install`), `--yes` for
 unattended runs, `--json` on any command that answers a question.
 
-`install` flags: `--domain`, `--public-url`, `--http-port`, `--https-port`,
-`--admin-username`, `--acme-email`. Each of the first two names one of the three
+`install` flags: `--domain`, `--dns-provider`, `--dns-token`, `--public-url`,
+`--http-port`, `--https-port`, `--admin-username`, `--acme-email`. Each of
+`--domain` and `--public-url` names one of the three
 shapes above, so there is no combination to reconcile.
 
 `worker uninstall` (also `worker remove`) takes the container, both named

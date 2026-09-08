@@ -62,6 +62,15 @@ export const SEALED = [
  */
 export const OWNED = [
   "DOMAIN",
+  // Both follow the domain, and both have to be cleared when it goes: a
+  // DNS_API_TOKEN left behind by a deployment that moved back to a tunnel is a
+  // provider credential sitting in a file nothing reads any more.
+  //
+  // Safe to clear only because `shape.infer` reads them back out of this same
+  // file before `derive` is asked for them — see the note there.
+  "DNS_PROVIDER",
+  "DNS_API_TOKEN",
+  "DNS_MODULE_REPLACE",
   "HTTP_PORT",
   "HTTPS_PORT",
   "HTTP_BIND",
@@ -93,6 +102,26 @@ export function reshape(existing: Env, owned: Env): Env {
   }
 
   return next;
+}
+
+/**
+ * Keys whose value must never be printed.
+ *
+ * `changes` feeds a block the operator reads before confirming, and until
+ * DNS_API_TOKEN there was nothing in `OWNED` worth hiding — every sealed secret
+ * is by definition never rewritten, so none of them ever appeared in a diff.
+ * That token does: adding a domain to an existing deployment writes one, and
+ * printing it would put a credential that can edit DNS for the zone into a
+ * terminal's scrollback and into any CI log capturing it.
+ */
+export const REDACTED = ["DNS_API_TOKEN"] as const;
+
+/** A value as it may be shown. */
+export function display(key: string, value?: string): string {
+  if (value === undefined) return "unset";
+  if (value === "") return "empty";
+
+  return (REDACTED as readonly string[]).includes(key) ? "•".repeat(8) : value;
 }
 
 export interface Change {
@@ -256,6 +285,10 @@ export interface Rendered {
  */
 const EXPLAINED = [
   "DOMAIN",
+  "DNS_PROVIDER",
+  "DNS_API_TOKEN",
+  "DNS_MODULE_REPLACE",
+  "ACME_EMAIL",
   "COMPOSE_PROFILES",
   "HTTP_BIND",
   "HTTP_PORT",
@@ -293,6 +326,34 @@ export function format(values: Env): string {
 # when nothing outside this machine reaches it, and when a reverse proxy you
 # already run is the thing holding the certificate.
 ${line("DOMAIN")}
+# How the certificate for that name is obtained, and it is obtained without
+# this machine being reachable from the internet. Caddy answers a DNS-01
+# challenge by writing a TXT record through your provider's API — every
+# connection outbound — and renews on its own at about two-thirds of the
+# certificate's life.
+#
+# DNS_PROVIDER is the module name under https://github.com/caddy-dns, and it is
+# compiled into Caddy: changing it needs \`docker compose -f firetower.yml up -d
+# --build\`, not just a restart. \`none\` means you supply the certificate in
+# ./certs yourself, and nothing renews it.
+${line("DNS_PROVIDER")}
+# The credential Caddy writes that record with. Scope it to editing records in
+# the one zone this domain is in, if your provider lets you say that.
+#
+# This file is chmod 600, and Caddy reads this from the environment rather than
+# from the Caddyfile — so it is not in the config on disk. It is still readable
+# by root and visible in \`docker compose config\`.
+${line("DNS_API_TOKEN")}
+# Only present for a provider module that will not build as published, because
+# something it depends on is too old. Substitutes one Go module for another
+# while Caddy is built.
+#
+# Delete it once the module's maintainer tags a release — after that this pins
+# an older dependency than the module itself asks for.
+${line("DNS_MODULE_REPLACE")}
+# Optional. Where Let's Encrypt writes about an expiry that got past Caddy's
+# own renewal. Issuance works without it.
+${line("ACME_EMAIL")}
 # Which optional services exist. \`tls\` creates Caddy, which is the only thing
 # that terminates a certificate; without it the control plane serves its own
 # interface and API directly, and no proxy is created at all.

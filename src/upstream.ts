@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { providerBlock } from "./providers.js";
 
 /**
  * The deployment files, from the repository that owns them.
@@ -27,6 +28,22 @@ export interface Deployment {
   tag: string | null;
   compose: string;
   caddyfile: string;
+  /**
+   * The Dockerfile that builds Caddy with one DNS provider module in it.
+   *
+   * Not optional, even though only the `tls` profile builds anything: the
+   * compose file's `caddy` service names it as its `dockerfile`, so a
+   * deployment directory without it fails at `up` — with a build error about a
+   * missing file rather than anything about certificates.
+   */
+  dockerfile: string;
+  /**
+   * Whether `dockerfile` is the bundled copy rather than the release's.
+   *
+   * True for a release that predates the file — which is not a failure, and so
+   * must not be reported as the offline fallback that `tag: null` means.
+   */
+  dockerfileIsBundled: boolean;
 }
 
 interface Release {
@@ -70,7 +87,13 @@ async function bundled(): Promise<Deployment> {
     tag: null,
     compose: await readFile(join(dir, "firetower.yml"), "utf8"),
     caddyfile: await readFile(join(dir, "Caddyfile"), "utf8"),
+    dockerfile: await bundledDockerfile(),
+    dockerfileIsBundled: true,
   };
+}
+
+function bundledDockerfile(): Promise<string> {
+  return readFile(join(fallbackDir(), "Caddyfile.dockerfile"), "utf8");
 }
 
 export interface FetchOptions {
@@ -93,12 +116,31 @@ export async function deployment(options: FetchOptions = {}): Promise<Deployment
   try {
     const tag = options.tag ?? (await latestTag(controller.signal));
 
-    const [compose, caddyfile] = await Promise.all([
+    const [compose, caddyfile, dockerfile] = await Promise.all([
       raw(tag, "deploy/firetower.yml", controller.signal),
       raw(tag, "deploy/Caddyfile", controller.signal),
+      // Added to the main repository later than the other two, and a release
+      // that predates it has no build section that needs one. A 404 here is
+      // that release rather than a network failure, so it must not drag the
+      // two files that *did* come back into the offline fallback — which would
+      // install a stale compose file and blame GitHub for it.
+      //
+      // The bundled copy is harmless against such a release: nothing
+      // references it. Whether that release can obtain a certificate at all is
+      // a separate question, and `services.obtainsCertificates` is what asks
+      // it.
+      raw(tag, "deploy/Caddyfile.dockerfile", controller.signal)
+        .then((text) => ({ text, bundled: false }))
+        .catch(async () => ({ text: await bundledDockerfile(), bundled: true })),
     ]);
 
-    return { tag, compose, caddyfile };
+    return {
+      tag,
+      compose,
+      caddyfile,
+      dockerfile: dockerfile.text,
+      dockerfileIsBundled: dockerfile.bundled,
+    };
   } catch {
     return bundled();
   } finally {
@@ -107,15 +149,25 @@ export async function deployment(options: FetchOptions = {}): Promise<Deployment
 }
 
 /**
- * Caddy refuses an empty `email`, which is why the file in the main repository
- * leaves the block out entirely — a config that will not start is a worse
- * default than a missing warning. Having a value, we can add it, and Let's
- * Encrypt will warn before a renewal that has started failing.
+ * The Caddyfile with the provider's own `dns` shape in it.
+ *
+ * The shipped file carries the one-line form, which is right for the providers
+ * that take a single token and a parse error for the ones that do not. This is
+ * the one edit the CLI makes to that file — and it is made once, at write time,
+ * so what lands on disk is what Caddy will read and what the operator will edit
+ * afterwards. `upgrade` never touches the Caddyfile, so both survive.
+ *
+ * Returns the file unchanged when the shape already matches, which is the
+ * common case and also what happens against a release whose Caddyfile does not
+ * carry that line at all.
  */
-export function withAcmeEmail(caddyfile: string, email: string | null): string {
-  if (!email) return caddyfile;
+export function withProviderBlock(caddyfile: string, provider: string): string {
+  const block = providerBlock(provider);
+  const oneLine = "dns {$DNS_PROVIDER} {env.DNS_API_TOKEN}";
 
-  return `{\n\temail ${email}\n}\n\n${caddyfile}`;
+  if (block === oneLine || !caddyfile.includes(oneLine)) return caddyfile;
+
+  return caddyfile.replace(oneLine, block);
 }
 
 /**

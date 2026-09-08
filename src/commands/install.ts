@@ -10,7 +10,9 @@ import { defaultInstallDir, rememberDir } from "../config.js";
 import { invent } from "../password.js";
 import * as services from "../services.js";
 import { missingVariables } from "../deployment.js";
+import { MULTI_FIELD } from "../providers.js";
 import {
+  askReach,
   cancelled,
   certificate,
   choosePorts,
@@ -18,9 +20,11 @@ import {
   published,
   publicUrl,
   stop,
+  suppliesOwnCertificate,
   tunnelCommand,
   type Ports,
   type Reach,
+  type ReachOptions,
 } from "../shape.js";
 import { ui, pc } from "../ui.js";
 
@@ -33,15 +37,12 @@ import { ui, pc } from "../ui.js";
  */
 export { publicUrl, certificate, published, tunnelCommand, type Reach };
 
-export interface InstallOptions {
+export interface InstallOptions extends ReachOptions {
   dir?: string;
-  domain?: string;
-  publicUrl?: string;
   httpPort?: number;
   httpsPort?: number;
   adminUsername?: string;
   acmeEmail?: string;
-  yes?: boolean;
   /** Install this release rather than the latest. For reproducing a report. */
   tag?: string;
 }
@@ -53,9 +54,7 @@ export async function install(options: InstallOptions): Promise<void> {
 
   // Before anything is asked, so a machine that cannot host this says so
   // before the operator has answered a page of questions.
-  if (dir && (await exists(join(dir, docker.COMPOSE_FILE)))) {
-    stop(`Firetower is already installed in ${dir}. Use \`firetower upgrade\`.`);
-  }
+  if (dir) await refuseIfInstalled(dir);
 
   const reach = await askReach(options);
 
@@ -69,9 +68,17 @@ export async function install(options: InstallOptions): Promise<void> {
   if (files.tag) {
     ui.ok("firetower.yml", `firetower-cloud/firetower @ ${files.tag}`);
     ui.ok("Caddyfile", `firetower-cloud/firetower @ ${files.tag}`);
+    ui.ok(
+      "Caddyfile.dockerfile",
+      files.dockerfileIsBundled
+        ? "bundled — this release does not publish one"
+        : `firetower-cloud/firetower @ ${files.tag}`,
+    );
   } else {
     ui.warn("using the bundled deployment files", "github was unreachable; they may be older");
   }
+
+  refuseIfItCannotIssue(reach, files.compose);
 
   const ports = await choosePorts(reach, files.compose, options);
 
@@ -102,6 +109,15 @@ export async function install(options: InstallOptions): Promise<void> {
   }
 
   const directory = dir ?? (await askDirectory());
+
+  // Again, because the check above only had a directory to test when one was
+  // given. Interactively there is none until the question is answered — and
+  // without this, `install` into a directory that already holds a deployment
+  // walked straight past it and half-reconfigured the thing: `env.merge` fills
+  // empty keys, so a loopback install would silently acquire the domain,
+  // profile and token just answered, while keeping ports and secrets from the
+  // install it was pretending not to be replacing.
+  await refuseIfInstalled(directory);
   const admin = await askAdmin(options);
 
   ui.blank();
@@ -121,6 +137,12 @@ export async function install(options: InstallOptions): Promise<void> {
     ...secrets,
     ADMIN_USERNAME: admin.username,
     ADMIN_INITIAL_PASSWORD: admin.password,
+    // Optional, and only meaningful where something issues a certificate. It
+    // reaches Caddy's global options through the compose file's environment,
+    // which is why nothing rewrites the Caddyfile to carry it any more.
+    ...(options.acmeEmail && reach.kind === "domain" && !suppliesOwnCertificate(reach)
+      ? { ACME_EMAIL: options.acmeEmail }
+      : {}),
   };
 
   ui.blank();
@@ -130,6 +152,11 @@ export async function install(options: InstallOptions): Promise<void> {
   ui.dim(`url           ${values.FIRETOWER_PUBLIC_URL}`);
   ui.dim(`published     ${published(reach, ports)}`);
   ui.dim(`certificate   ${certificate(reach)}`);
+  // The provider, never the token. This block is what people paste into an
+  // issue when an install goes wrong.
+  if (reach.kind === "domain" && !suppliesOwnCertificate(reach)) {
+    ui.dim(`dns           ${reach.dnsProvider}, with the token you gave (not shown)`);
+  }
   ui.dim(`admin         ${admin.username}, with the password shown once below`);
   ui.dim(`root key      generated, written to ${join(directory, ".env")}`);
   ui.blank();
@@ -152,9 +179,9 @@ export async function install(options: InstallOptions): Promise<void> {
     if (cancelled(proceed) || !proceed) stop("Nothing was written.");
   }
 
-  await write(directory, files, values, options.acmeEmail ?? null);
+  await write(directory, files, values, reach);
   await requireCertificate(directory, reach);
-  await start(directory, files.compose);
+  await start(directory, files.compose, reach);
   await backUpTheKey(secrets.FIRETOWER_ROOT_KEY, directory, options);
   await rememberDir(directory);
 
@@ -162,15 +189,22 @@ export async function install(options: InstallOptions): Promise<void> {
 }
 
 /**
- * The one thing the `domain` shape needs that this CLI cannot generate.
+ * The one thing the bring-your-own-certificate shape needs that this CLI
+ * cannot generate.
  *
  * Checked after the files are written, so the operator has somewhere to put
  * the certificate and a Caddyfile explaining where to get one — and before
  * anything is pulled or started, so the failure is a sentence rather than a
  * container restarting forever.
+ *
+ * **It no longer runs for every `domain` install**, and that is the point of
+ * this pass. Caddy obtains the certificate itself over DNS-01, so demanding
+ * `certs/fullchain.pem` from a deployment that is about to be issued one —
+ * and exiting non-zero when it is absent — would refuse every install of the
+ * shape this release exists to add.
  */
 async function requireCertificate(directory: string, reach: Reach): Promise<void> {
-  if (reach.kind !== "domain") return;
+  if (!suppliesOwnCertificate(reach)) return;
 
   const certs = join(directory, "certs");
   const wanted = ["fullchain.pem", "privkey.pem"];
@@ -188,15 +222,34 @@ async function requireCertificate(directory: string, reach: Reach): Promise<void
   ui.blank();
   ui.warn(
     `${certs} has no ${missing.join(" or ")}`,
-    "Caddy will not start without them. See the Caddyfile for how to get a certificate for a name the internet cannot reach — it has to cover both the name and *.the-name.",
+    "you chose to supply the certificate yourself, and Caddy will not start without it. It has to cover both the name and *.the-name — see the Caddyfile, which also has the `tls` line to uncomment.",
   );
   ui.blank();
   ui.step("Everything is written. Put the two files in place, then:");
   ui.blank();
-  ui.dim(`  cd ${directory} && docker compose -f ${docker.COMPOSE_FILE} --profile tls up -d`);
+  ui.dim(
+    `  cd ${directory} && docker compose -f ${docker.COMPOSE_FILE} --profile tls up -d --build`,
+  );
   ui.blank();
 
   process.exit(1);
+}
+
+/**
+ * `install` makes a deployment; it does not edit one.
+ *
+ * It generates a root key and a database password, and the whole of `env.ts`
+ * exists to stop those landing on top of an existing database. So a directory
+ * that already has a compose file is refused — and pointed at the command that
+ * does want to change something, which since this pass is a real one.
+ */
+async function refuseIfInstalled(directory: string): Promise<void> {
+  if (!(await exists(join(directory, docker.COMPOSE_FILE)))) return;
+
+  stop(
+    `Firetower is already installed in ${directory}.`,
+    "`firetower domain` changes how it is reached — adding a name, or taking one away. `firetower upgrade` moves it to a newer release.",
+  );
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -209,82 +262,29 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
- * The first question, and the one the rest of the install reads.
+ * Stop before writing a token that nothing is going to read.
  *
- * Three answers rather than yes-or-no, because "yes, a domain" used to mean two
- * things that need different deployments. Somebody who already runs nginx on 80
- * has a domain *and* cannot give Caddy the ports a certificate needs, and until
- * there was a third answer this CLI had nothing to offer them.
+ * The compose file comes from the release, not from this CLI, and one from
+ * before DNS-01 terminates TLS with a certificate the operator supplies — no
+ * DNS_PROVIDER anywhere in it. Carrying on would write the module name and the
+ * API token into `.env`, start a Caddy that reads neither, and leave somebody
+ * certain they had configured automatic renewal that was never going to
+ * happen. The same argument as `choosePorts` makes about `HTTP_PORT`, with a
+ * worse failure at the end of it.
  *
- * None of the three publishes the control plane to the internet, and that is
- * not an omission. It holds every git token, every agent credential and the
- * root key; whoever reaches it can erase the codebase of the company that
- * installed it. `domain` used to mean "let Caddy get a certificate from Let's
- * Encrypt", which required exactly that exposure — and issued one certificate
- * per preview hostname, publishing each to Certificate Transparency logs even
- * though a preview hostname *is* the credential for that preview. It now means
- * a certificate the operator supplies, for a name the internet need never
- * reach.
- *
- * Each flag names exactly one of the three, so there is no combination to
- * reconcile.
+ * Only the shape that asked for issuance is affected. Supplying your own
+ * certificate works against every release, which is why it is the answer
+ * offered here.
  */
-async function askReach(options: InstallOptions): Promise<Reach> {
-  if (options.domain) return { kind: "domain", domain: options.domain.trim() };
-  if (options.publicUrl) return { kind: "proxy", publicUrl: trimUrl(options.publicUrl) };
+function refuseIfItCannotIssue(reach: Reach, compose: string): void {
+  if (reach.kind !== "domain" || suppliesOwnCertificate(reach)) return;
+  if (services.obtainsCertificates(compose)) return;
 
-  // `--domain ""` is how a script says "no domain", and has always meant that.
-  if (options.domain === "" || options.yes) return { kind: "local" };
-
-  const choice = await prompts.select({
-    message: "How will people reach this Firetower?",
-    options: [
-      {
-        value: "local",
-        label: "Only from this machine, over an ssh tunnel  (recommended)",
-      },
-      {
-        value: "domain",
-        label: "On a name, over HTTPS — with a certificate I supply",
-      },
-      { value: "proxy", label: "Behind a reverse proxy I already run" },
-    ],
-  });
-  if (cancelled(choice)) stop("Nothing was written.");
-
-  if (choice === "local") return { kind: "local" };
-
-  if (choice === "domain") {
-    const domain = await prompts.text({
-      message: "Domain",
-      placeholder: "firetower.example.com",
-      validate: (value) =>
-        value.trim() ? undefined : "A domain, or go back and choose another answer",
-    });
-    if (cancelled(domain)) stop("Nothing was written.");
-
-    return { kind: "domain", domain: String(domain).trim() };
-  }
-
-  // Asked rather than worked out. With their proxy in front, nothing here can
-  // know what it serves — and this is the URL printed at the end and carried in
-  // every notification.
-  const url = await prompts.text({
-    message: "What address will people open?",
-    placeholder: "https://firetower.example.com",
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed) return "The address your proxy serves";
-      if (!/^https?:\/\/[^/]+/.test(trimmed)) return "Starting with http:// or https://";
-      return undefined;
-    },
-  });
-  if (cancelled(url)) stop("Nothing was written.");
-
-  return { kind: "proxy", publicUrl: trimUrl(String(url)) };
+  stop(
+    "this Firetower release cannot obtain a certificate",
+    "it terminates TLS with one you supply. Install without --dns-provider and put fullchain.pem and privkey.pem in ./certs, or wait for a release that reads DNS_PROVIDER.",
+  );
 }
-
-const trimUrl = (value: string): string => value.trim().replace(/\/+$/, "");
 
 async function askDirectory(): Promise<string> {
   const directory = await prompts.text({
@@ -339,7 +339,7 @@ async function write(
   directory: string,
   files: upstream.Deployment,
   values: env.Env,
-  acmeEmail: string | null,
+  reach: Reach,
 ): Promise<void> {
   ui.blank();
   ui.step("Writing");
@@ -350,9 +350,28 @@ async function write(
   await writeFile(composePath, files.compose);
   ui.ok(composePath);
 
+  // Written as it comes, where it used to have an `email` block prepended.
+  // ACME_EMAIL now reaches Caddy's global options through the compose file's
+  // environment, and the Caddyfile already has the one-line block that reads
+  // it — prepending a second global block would make the file unparseable.
+  //
+  // This also keeps the file the operator may hand-edit — a provider that
+  // needs more than a token, or the bring-your-own `tls` line — as a file
+  // nothing rewrites afterwards.
   const caddyPath = join(directory, "Caddyfile");
-  await writeFile(caddyPath, upstream.withAcmeEmail(files.caddyfile, acmeEmail));
-  ui.ok(caddyPath);
+  const caddyfile = upstream.withProviderBlock(
+    files.caddyfile,
+    reach.kind === "domain" ? reach.dnsProvider : "",
+  );
+  await writeFile(caddyPath, caddyfile);
+  ui.ok(caddyPath, caddyfile === files.caddyfile ? undefined : "with the provider block to fill in");
+
+  // The compose file's `caddy` service names this as its `dockerfile`, so it
+  // has to be here even in the shapes that never build it: Compose reads the
+  // build section whether or not the profile selects the service.
+  const dockerfilePath = join(directory, "Caddyfile.dockerfile");
+  await writeFile(dockerfilePath, files.dockerfile);
+  ui.ok(dockerfilePath);
 
   // Made here rather than left to Docker. A bind mount whose source does not
   // exist is created by the daemon, owned by root, and then Caddy fails to
@@ -375,7 +394,7 @@ async function write(
   }
 }
 
-async function start(directory: string, compose: string): Promise<void> {
+async function start(directory: string, compose: string, reach: Reach): Promise<void> {
   ui.blank();
   ui.step("Starting");
 
@@ -384,8 +403,27 @@ async function start(directory: string, compose: string): Promise<void> {
   // minutes against a stack that came up perfectly.
   const named = services.resolve(compose);
 
-  await docker.composeOrThrow({ dir: directory, stream: true }, "pull");
-  await docker.composeOrThrow({ dir: directory }, "up", "-d");
+  await pull(directory);
+
+  // Caddy is built rather than pulled — a DNS provider is a compiled-in module
+  // — and the first build pulls a Go toolchain and compiles from source. Said
+  // out loud because it is minutes of silence otherwise, on the step where
+  // silence reads as a hang.
+  const building = reach.kind === "domain";
+  if (building) {
+    ui.blank();
+    ui.step("Building Caddy with the DNS provider compiled in.");
+    ui.step("The first one takes a few minutes; after that it is cached.");
+    ui.blank();
+  }
+
+  // Streamed when it builds, for the same reason.
+  await docker.composeOrThrow(
+    { dir: directory, stream: building },
+    "up",
+    "-d",
+    ...(building ? ["--build"] : []),
+  );
 
   await docker.waitForHealthy({ dir: directory }, named.database);
   ui.ok(`${named.database} healthy`);
@@ -395,6 +433,35 @@ async function start(directory: string, compose: string): Promise<void> {
 
   const version = await docker.deployedVersion({ dir: directory }, named.control);
   if (version) ui.ok("version", version);
+}
+
+/**
+ * Pull the images, without tripping over the one that is built.
+ *
+ * A plain `docker compose pull` exits non-zero once a service has a `build`
+ * section: it tries to pull `firetower-caddy` from a registry, is told the
+ * repository does not exist, and fails the whole command — even though that
+ * image was never going to come from a registry. `--ignore-buildable` is the
+ * flag for exactly that, and a Compose old enough not to have it rejects the
+ * flag itself, so the plain form is tried after.
+ *
+ * Neither being possible is not fatal. `up` pulls whatever is missing anyway;
+ * this runs first only so several hundred megabytes arrive against a progress
+ * bar rather than behind a silent `up`, and a failure here is better reported
+ * by the command that actually needs the images.
+ */
+async function pull(directory: string): Promise<void> {
+  const ignoringBuildable = await docker.compose(
+    { dir: directory, stream: true },
+    "pull",
+    "--ignore-buildable",
+  );
+  if (ignoringBuildable.exitCode === 0) return;
+
+  const plain = await docker.compose({ dir: directory, stream: true }, "pull");
+  if (plain.exitCode === 0) return;
+
+  ui.warn("could not pull every image up front", "carrying on — `up` pulls what it needs");
 }
 
 /**
@@ -458,6 +525,19 @@ function finish(
     ui.dim(`  ${tunnelCommand(ports.http)}`);
     ui.blank();
     ui.step("Then open");
+    ui.blank();
+  }
+
+  // Said at the end as well as at the prompt, because the flag path never sees
+  // the prompt — `--dns-provider route53` would otherwise finish with "Firetower
+  // is running" and no hint that the proxy cannot get a certificate until a file
+  // is edited.
+  if (reach.kind === "domain" && MULTI_FIELD.has(reach.dnsProvider)) {
+    ui.step(`${reach.dnsProvider} takes several values, so its block in`);
+    ui.step("./Caddyfile is empty and has to be filled in before a certificate");
+    ui.step("can be issued. `firetower upgrade` never touches that file.");
+    ui.blank();
+    ui.dim("  https://github.com/caddy-dns/" + reach.dnsProvider);
     ui.blank();
   }
 

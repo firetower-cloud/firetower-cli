@@ -13,6 +13,7 @@ import {
   cancelled,
   choosePorts,
   derive,
+  describe,
   infer,
   published,
   stop,
@@ -127,8 +128,31 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
 
   await clearForTakeoff(dir, plan);
 
-  await docker.composeOrThrow({ dir, stream: true }, "pull");
-  await docker.composeOrThrow({ dir }, "up", "-d");
+  // `--ignore-buildable` for the same reason `install` uses it: Caddy is built
+  // here, not pulled, and a plain `pull` fails trying to find it in a registry.
+  const pulled = await docker.compose(
+    { dir, stream: true },
+    "pull",
+    "--ignore-buildable",
+  );
+  if (pulled.exitCode !== 0) await docker.compose({ dir, stream: true }, "pull");
+
+  // `--build` because the Dockerfile that builds Caddy travels with the
+  // release, and this may have just replaced it. Without it the image already
+  // on the machine is reused and the upgrade quietly does not reach the proxy.
+  const building = services.activeProfiles(plan.next).includes("tls");
+  if (building) {
+    ui.blank();
+    ui.step("Rebuilding Caddy against the new release. This can take a few minutes.");
+    ui.blank();
+  }
+
+  await docker.composeOrThrow(
+    { dir, stream: building },
+    "up",
+    "-d",
+    ...(building ? ["--build"] : []),
+  );
   await docker.waitForHealthy({ dir }, control);
   ui.ok("healthy");
 
@@ -296,7 +320,7 @@ function report(plan: Plan, composeChanged: boolean): void {
     ui.step(".env, recomputed from this release:");
     ui.blank();
     for (const { key, before, after } of plan.changes) {
-      ui.dim(`  ${key.padEnd(24)} ${shown(before)} → ${shown(after)}`);
+      ui.dim(`  ${key.padEnd(24)} ${env.display(key, before)} → ${env.display(key, after)}`);
     }
   }
 
@@ -316,15 +340,7 @@ function report(plan: Plan, composeChanged: boolean): void {
 }
 
 /** A value that is absent and one that is empty are different, and both matter. */
-const shown = (value?: string): string =>
-  value === undefined ? "unset" : value === "" ? "empty" : value;
 
-function describe(reach: Reach): string {
-  if (reach.kind === "domain") return `${reach.domain}, over HTTPS`;
-  if (reach.kind === "proxy") return `${reach.publicUrl}, behind your own proxy`;
-
-  return "this machine only, over an ssh tunnel";
-}
 
 /**
  * `.env`, with the previous one kept beside it.
@@ -458,8 +474,22 @@ async function refreshComposeFile(dir: string, options: UpgradeOptions): Promise
   await writeFile(path, files.compose);
   ui.ok(docker.COMPOSE_FILE, `updated, previous kept as ${docker.COMPOSE_FILE}.backup`);
 
+  // The compose file just taken names this as the `caddy` service's
+  // `dockerfile`, and Compose reads a build section whether or not the profile
+  // selects the service. A deployment that predates it has no such file, so
+  // taking the new compose without this is an upgrade that cannot come back up.
+  //
+  // Not backed up and not diffed, unlike the two files above: this one is
+  // never hand-edited — a provider that needs more than a token is configured
+  // in the Caddyfile, which nothing here touches.
+  await writeFile(join(dir, DOCKERFILE), files.dockerfile);
+  ui.ok(DOCKERFILE, "written for the caddy build");
+
   return true;
 }
+
+/** The Dockerfile the compose file's `caddy` service builds from. */
+const DOCKERFILE = "Caddyfile.dockerfile";
 
 /**
  * Offered first and defaulted to yes: migrations run on start and there is no

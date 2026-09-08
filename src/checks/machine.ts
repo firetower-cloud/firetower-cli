@@ -1,5 +1,7 @@
 import { statfs } from "node:fs/promises";
-import { resolve4 } from "node:dns/promises";
+import { networkInterfaces } from "node:os";
+import { randomBytes } from "node:crypto";
+import { resolve4, resolve6 } from "node:dns/promises";
 import * as docker from "../docker.js";
 import { ok, warn, fail, type Check } from "./index.js";
 
@@ -150,59 +152,158 @@ export const registries: Check = {
 };
 
 /**
- * Whether the domain points here.
+ * Every address this machine answers on, from its own interfaces.
  *
- * Worth the network call because the failure it prevents is the expensive one:
- * Caddy asks Let's Encrypt, the challenge fails because the name resolves
- * somewhere else, and the rate limit that follows is measured in days.
+ * Loopback and the rest of the internal ones are left out: a domain pointing at
+ * 127.0.0.1 resolves to *the browser's* machine, not this one, so it is not
+ * evidence that this deployment is reachable. It is called out separately
+ * below, because it is a specific mistake with a specific remedy.
+ */
+export function localAddresses(): string[] {
+  const found = new Set<string>();
+
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (!address.internal) found.add(address.address);
+    }
+  }
+
+  return [...found];
+}
+
+const isLoopbackAddress = (address: string): boolean =>
+  address === "::1" || address.startsWith("127.");
+
+/** A and AAAA together — either is a way to point a name at this machine. */
+async function addressesOf(domain: string): Promise<string[]> {
+  const [a, aaaa] = await Promise.all([
+    resolve4(domain).catch((): string[] => []),
+    resolve6(domain).catch((): string[] => []),
+  ]);
+
+  return [...a, ...aaaa];
+}
+
+/**
+ * Whether the domain points here, and whether previews will resolve.
  *
- * That rate limit is also the whole reason the published ports are pinned to 80
- * and 443 when there is a domain — the challenge is answered on those two and
- * nowhere else. The two decisions are the same decision, so they are written
- * down together.
+ * **This used to compare against this machine's public IP and fail when they
+ * differed.** That was right when Caddy answered an HTTP-01 challenge, because
+ * then the name had to resolve to somewhere Let's Encrypt could reach. It is
+ * wrong now, and wrong in the direction that matters: the certificate is
+ * obtained over DNS-01, which needs no inbound path at all, so the address in
+ * DNS should be whatever *browsers* use — and on the networks this product is
+ * built for that is a private one. A tailnet address, or 10.0.0.5. As written
+ * the check failed every correct install of the shape it was guarding, and told
+ * the operator about an ACME rate limit that no longer applies.
  *
- * A deployment behind somebody's own reverse proxy has no domain here and gets
- * no certificate from us, so there is nothing for this to protect and `install`
- * passes no domain at all.
+ * So the question is now "is this an address this machine answers on", public
+ * or private, with the public-IP lookup kept only as a fallback for the machine
+ * behind NAT whose interfaces show none of it.
+ *
+ * Nothing here fails on a mismatch any more. DNS that points somewhere else
+ * does not stop the certificate being issued; it stops people reaching the
+ * server, which this cannot always tell apart from a split-horizon answer, a
+ * load balancer, or a name that is meant to resolve differently from here.
+ *
+ * The wildcard is checked too, and it is not a detail: previews are served at
+ * `<session>-<port>-<signature>.DOMAIN`, so a deployment with the apex record
+ * and no wildcard gets an interface that works and previews that do not
+ * resolve at all.
  */
 export const domainResolves: Check = {
   name: "domain",
   preflight: true,
   deployment: true,
   async run({ domain }) {
-    if (!domain) return ok("domain", "none — no certificate to get");
+    if (!domain) return ok("domain", "none — reached on loopback");
 
-    let addresses: string[];
-    try {
-      addresses = await resolve4(domain);
-    } catch {
+    const addresses = await addressesOf(domain);
+
+    if (addresses.length === 0) {
       return fail(
         "domain",
         `${domain} does not resolve`,
-        "point an A record at this machine and wait for it to propagate",
+        "point an A record at this machine — the address browsers reach it on, which on a private network is a private one",
       );
     }
 
-    let publicIp: string | null = null;
-    try {
-      const response = await fetch("https://api.ipify.org", {
-        signal: AbortSignal.timeout(8000),
-      });
-      publicIp = (await response.text()).trim();
-    } catch {
-      // Not knowing our own address is not the domain's fault.
-      return warn("domain", `${domain} → ${addresses.join(", ")}`, "could not confirm it is us");
+    // Probed with a label nothing could have been configured for, because that
+    // is the only way to tell a wildcard from a single record that happens to
+    // exist. A resolver that answers this answers every preview hostname.
+    const label = `probe-${randomBytes(3).toString("hex")}`;
+    const wildcard = (await addressesOf(`${label}.${domain}`)).length > 0;
+
+    const where = await pointsHere(domain, addresses);
+
+    if (!wildcard) {
+      return warn(
+        "domain",
+        `${where.detail}, but *.${domain} does not resolve`,
+        `previews are served on subdomains and will not resolve. Add a wildcard A record: *.${domain} → the same address.`,
+      );
     }
 
-    return addresses.includes(publicIp)
-      ? ok("domain", `resolves to ${publicIp}, which is this machine`)
-      : fail(
-          "domain",
-          `${domain} resolves to ${addresses.join(", ")}, not ${publicIp}`,
-          "Caddy will fail the ACME challenge, and the rate limit lasts days",
-        );
+    return where.here
+      ? ok("domain", `${where.detail}, and *.${domain} resolves`)
+      : warn("domain", where.detail, where.remedy);
   },
 };
+
+interface Pointing {
+  here: boolean;
+  detail: string;
+  remedy?: string;
+}
+
+async function pointsHere(domain: string, addresses: string[]): Promise<Pointing> {
+  const mine = new Set(localAddresses());
+  const matched = addresses.filter((address) => mine.has(address));
+
+  if (matched.length > 0) {
+    return { here: true, detail: `${domain} → ${matched.join(", ")}, an address on this machine` };
+  }
+
+  if (addresses.every(isLoopbackAddress)) {
+    return {
+      here: false,
+      detail: `${domain} → ${addresses.join(", ")}, which is loopback`,
+      remedy:
+        "that resolves to whichever machine the browser is on, not this one. Point it at an address of this machine that the people using it can reach.",
+    };
+  }
+
+  // Only now, and only because the interfaces did not answer: a machine behind
+  // NAT has its public address on a router rather than on itself.
+  const publicIp = await publicAddress();
+
+  if (publicIp && addresses.includes(publicIp)) {
+    return {
+      here: true,
+      detail: `${domain} → ${publicIp}, this machine's public address`,
+    };
+  }
+
+  return {
+    here: false,
+    detail: `${domain} → ${addresses.join(", ")}, which is not an address of this machine`,
+    remedy:
+      "not necessarily wrong — a load balancer, or DNS that answers differently from here, both look like this. Worth confirming a browser on your network reaches this machine at that name.",
+  };
+}
+
+async function publicAddress(): Promise<string | null> {
+  try {
+    const response = await fetch("https://api.ipify.org", {
+      signal: AbortSignal.timeout(8000),
+    });
+    return (await response.text()).trim();
+  } catch {
+    // Not knowing our own address is not the domain's fault, and with DNS-01
+    // it is not needed for anything else.
+    return null;
+  }
+}
 
 export const machineChecks: Check[] = [
   dockerDaemon,

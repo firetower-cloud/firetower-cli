@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { infer, derive, choosePorts, ALTERNATE, type Ports, type Reach } from "../src/shape.js";
+import {
+  infer,
+  derive,
+  choosePorts,
+  suppliesOwnCertificate,
+  ALTERNATE,
+  type Ports,
+  type Reach,
+} from "../src/shape.js";
 import * as env from "../src/env.js";
 import * as services from "../src/services.js";
 import { hostPorts } from "../src/docker.js";
@@ -66,9 +74,17 @@ describe("infer", () => {
   });
 
   it("takes a domain as the domain shape", () => {
-    expect(infer({ DOMAIN: "firetower.example.com" })).toEqual({
+    expect(
+      infer({
+        DOMAIN: "firetower.example.com",
+        DNS_PROVIDER: "cloudflare",
+        DNS_API_TOKEN: "a-token",
+      }),
+    ).toEqual({
       kind: "domain",
       domain: "firetower.example.com",
+      dnsProvider: "cloudflare",
+      dnsToken: "a-token",
     });
   });
 
@@ -112,7 +128,12 @@ describe("derive", () => {
   });
 
   it("turns the tls profile on for a domain, and nothing else does", () => {
-    const reach: Reach = { kind: "domain", domain: "firetower.example.com" };
+    const reach: Reach = {
+      kind: "domain",
+      domain: "firetower.example.com",
+      dnsProvider: "cloudflare",
+      dnsToken: "a-token",
+    };
     const values = derive(reach, { http: 8080, https: 443, ...bound });
 
     expect(values.COMPOSE_PROFILES).toBe("tls");
@@ -160,7 +181,12 @@ describe("choosePorts", () => {
   });
 
   it("keeps the control plane out of Caddy's way when there is a certificate", async () => {
-    const reach: Reach = { kind: "domain", domain: "firetower.example.com" };
+    const reach: Reach = {
+      kind: "domain",
+      domain: "firetower.example.com",
+      dnsProvider: "cloudflare",
+      dnsToken: "a-token",
+    };
     const ports = await choosePorts(reach, CURRENT, {}, new Set());
 
     expect(ports.http).toBe(8080);
@@ -203,6 +229,64 @@ describe("allProfiles", () => {
 
   it("has nothing to say about a file with no profiles at all", () => {
     expect(services.allProfiles(PREVIOUS)).toEqual([]);
+  });
+});
+
+describe("the DNS provider, across an upgrade", () => {
+  const ports = { http: 8080, https: 443, ...bound };
+
+  /** A domain deployment as `install` left it. */
+  const installed: env.Env = {
+    DOMAIN: "firetower.example.com",
+    DNS_PROVIDER: "cloudflare",
+    DNS_API_TOKEN: "the-operator-typed-this",
+    COMPOSE_PROFILES: "tls",
+    FIRETOWER_PREVIEW_DOMAIN: "firetower.example.com",
+    FIRETOWER_PUBLIC_URL: "https://firetower.example.com",
+    HTTP_BIND: "127.0.0.1",
+    HTTP_PORT: "8080",
+    HTTPS_PORT: "443",
+    POSTGRES_PASSWORD: "kept-secret",
+    FIRETOWER_ROOT_KEY: "kept-key",
+  };
+
+  it("keeps the token, which is the one value here nothing can recompute", () => {
+    // Both are in `env.OWNED`, so `reshape` deletes them and writes back
+    // whatever `derive` returns — and `derive` only knows what `infer` read out
+    // of this same file. Break that round trip and an upgrade that changed
+    // nothing else deletes a working deployment's provider credential, which
+    // shows up as a certificate that silently stops renewing.
+    const next = env.reshape(installed, derive(infer(installed), ports));
+
+    expect(next.DNS_API_TOKEN).toBe("the-operator-typed-this");
+    expect(next.DNS_PROVIDER).toBe("cloudflare");
+  });
+
+  it("clears both when the deployment moves back to a tunnel", () => {
+    // A provider credential left behind in a file nothing reads any more.
+    const next = env.reshape(installed, derive({ kind: "local" }, ports));
+
+    expect(next).not.toHaveProperty("DNS_API_TOKEN");
+    expect(next).not.toHaveProperty("DNS_PROVIDER");
+  });
+
+  it("survives the round trip through the file it writes", () => {
+    const next = env.reshape(installed, derive(infer(installed), ports));
+    expect(env.parse(env.format(next))).toEqual(next);
+  });
+
+  it("writes neither for a deployment with no domain", () => {
+    const written = derive({ kind: "local" }, ports);
+
+    expect(written).not.toHaveProperty("DNS_PROVIDER");
+    expect(written).not.toHaveProperty("DNS_API_TOKEN");
+  });
+
+  it("reads a bring-your-own-certificate deployment back as one", () => {
+    const byo = infer({ ...installed, DNS_PROVIDER: "none", DNS_API_TOKEN: "" });
+
+    expect(suppliesOwnCertificate(byo)).toBe(true);
+    expect(suppliesOwnCertificate(infer(installed))).toBe(false);
   });
 });
 
@@ -298,5 +382,69 @@ describe("hostPorts", () => {
 
   it("has nothing to say about a container that publishes nothing", () => {
     expect(hostPorts("")).toEqual([]);
+  });
+});
+
+describe("changing reach on an existing deployment", () => {
+  /**
+   * What `firetower domain` computes. The command is thin — the derivation it
+   * relies on is all here, so this is where it is worth pinning down.
+   */
+  const loopback: env.Env = {
+    DOMAIN: "",
+    HTTP_BIND: "127.0.0.1",
+    HTTP_PORT: "8085",
+    FIRETOWER_PUBLIC_URL: "http://localhost:8085",
+    POSTGRES_PASSWORD: "kept-secret",
+    FIRETOWER_ROOT_KEY: "kept-key",
+  };
+
+  const withDomain: Reach = {
+    kind: "domain",
+    domain: "firetower.example.com",
+    dnsProvider: "cloudflare",
+    dnsToken: "a-token",
+  };
+
+  it("adds everything the tls profile needs, and nothing else", () => {
+    const next = env.reshape(loopback, derive(withDomain, { http: 8085, https: 443, ...bound }));
+
+    expect(next.DOMAIN).toBe("firetower.example.com");
+    expect(next.COMPOSE_PROFILES).toBe("tls");
+    expect(next.DNS_PROVIDER).toBe("cloudflare");
+    expect(next.DNS_API_TOKEN).toBe("a-token");
+    expect(next.FIRETOWER_PREVIEW_DOMAIN).toBe("firetower.example.com");
+    expect(next.FIRETOWER_PUBLIC_URL).toBe("https://firetower.example.com");
+  });
+
+  it("keeps the port the deployment was already published on", () => {
+    // Adding a name is not a reason to move the control plane. The command
+    // passes the current value through, and 8085 is not 8080.
+    const next = env.reshape(loopback, derive(withDomain, { http: 8085, https: 443, ...bound }));
+
+    expect(next.HTTP_PORT).toBe("8085");
+    expect(next.HTTP_BIND).toBe("127.0.0.1");
+  });
+
+  it("does not disturb the database or the root key", () => {
+    // The whole promise of the command: it changes how Firetower is reached,
+    // and touches nothing that would cost data.
+    const next = env.reshape(loopback, derive(withDomain, { http: 8085, https: 443, ...bound }));
+
+    expect(next.POSTGRES_PASSWORD).toBe("kept-secret");
+    expect(next.FIRETOWER_ROOT_KEY).toBe("kept-key");
+  });
+
+  it("takes it all away again, leaving no credential behind", () => {
+    const added = env.reshape(loopback, derive(withDomain, { http: 8085, https: 443, ...bound }));
+    const removed = env.reshape(added, derive({ kind: "local" }, { http: 8085, https: 8443, ...bound }));
+
+    expect(removed.DOMAIN).toBe("");
+    expect(removed).not.toHaveProperty("DNS_API_TOKEN");
+    expect(removed).not.toHaveProperty("DNS_PROVIDER");
+    expect(removed).not.toHaveProperty("COMPOSE_PROFILES");
+    expect(removed).not.toHaveProperty("HTTPS_PORT");
+    expect(removed.FIRETOWER_PUBLIC_URL).toBe("http://localhost:8085");
+    expect(removed.POSTGRES_PASSWORD).toBe("kept-secret");
   });
 });

@@ -1,17 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { withAcmeEmail, postgresMajor } from "../src/upstream.js";
+import { postgresMajor } from "../src/upstream.js";
 
-describe("withAcmeEmail", () => {
-  it("leaves the file alone when there is no address", () => {
-    const caddyfile = "{$DOMAIN} {\n\treverse_proxy firetower:4400\n}\n";
-    expect(withAcmeEmail(caddyfile, null)).toBe(caddyfile);
-  });
-
-  it("adds the block Caddy needs to send renewal warnings", () => {
-    const result = withAcmeEmail("{$DOMAIN} {\n}\n", "ops@example.com");
-    expect(result.startsWith("{\n\temail ops@example.com\n}\n")).toBe(true);
-  });
-});
+/**
+ * `withAcmeEmail` used to live here, prepending a `{ email … }` global block to
+ * the Caddyfile before it was written.
+ *
+ * It is gone rather than adapted. The Caddyfile now carries its own global
+ * block reading `{$ACME_EMAIL}` from the environment, and a Caddyfile may have
+ * exactly one — so prepending a second would have turned an address nobody
+ * needed into a proxy that could not parse its config at all. The address
+ * reaches Caddy through the compose file's environment instead, which also
+ * keeps the Caddyfile a file nothing rewrites after it is installed.
+ */
 
 describe("postgresMajor", () => {
   it("finds the major version in the compose file", () => {
