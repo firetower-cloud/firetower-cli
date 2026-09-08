@@ -46,14 +46,21 @@ function stop(message: string, remedy?: string): never {
  * where Firetower runs, not where it is read from.
  */
 async function remotePortOf(destination: string): Promise<number | null> {
-  const script = CANDIDATES.map((dir) => `cat ${dir}/.env 2>/dev/null`).join("; ");
+  // `; true` is what makes this correct, and its absence was a bug. The two
+  // `cat`s were joined with `;`, so the exit status was the *last* one's — an
+  // install in /opt/firetower read its `.env` successfully and then failed
+  // anyway, because ~/firetower/.env does not exist. With `2>/dev/null`
+  // swallowing the reason, the remedy line came out blank as well.
+  //
+  // The remote command now always succeeds, which leaves a non-zero status
+  // meaning the one thing it should mean: ssh could not run it.
+  const script = `${CANDIDATES.map((dir) => `cat ${dir}/.env 2>/dev/null`).join("; ")}; true`;
 
   const result = await execa("ssh", [destination, script], { reject: false });
   if (result.exitCode !== 0) {
-    stop(
-      `could not reach ${destination}`,
-      String(result.stderr).trim().split("\n").at(-1) ?? "check the destination and your key",
-    );
+    const reason = String(result.stderr).trim().split("\n").at(-1);
+
+    stop(`could not reach ${destination}`, reason || "check the destination and your key");
   }
 
   const values = env.parse(String(result.stdout));

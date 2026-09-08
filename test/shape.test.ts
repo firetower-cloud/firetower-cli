@@ -79,13 +79,27 @@ describe("infer", () => {
         DOMAIN: "firetower.example.com",
         DNS_PROVIDER: "cloudflare",
         DNS_API_TOKEN: "a-token",
+        HTTPS_BIND: "100.64.0.1",
       }),
     ).toEqual({
       kind: "domain",
       domain: "firetower.example.com",
       dnsProvider: "cloudflare",
       dnsToken: "a-token",
+      address: "100.64.0.1",
     });
+  });
+
+  it("reads back the bind, so an upgrade does not delete it", () => {
+    // `HTTPS_BIND` is in `env.OWNED`, so `reshape` clears it and writes back
+    // whatever `derive` is handed. Before it was carried through here, every
+    // `upgrade` and every `domain` silently rebound Caddy from a tailnet
+    // address to every interface — which on a machine with a public IP is the
+    // whole front door.
+    const before = { DOMAIN: "ft.example.com", DNS_PROVIDER: "godaddy", HTTPS_BIND: "100.64.0.1" };
+    const after = env.reshape(before, derive(infer(before), { http: 8080, https: 443, ...bound }));
+
+    expect(after.HTTPS_BIND).toBe("100.64.0.1");
   });
 
   it("reads an address that is not this machine as somebody else's proxy", () => {
@@ -133,8 +147,11 @@ describe("derive", () => {
       domain: "firetower.example.com",
       dnsProvider: "cloudflare",
       dnsToken: "a-token",
+      address: "100.64.0.1",
     };
     const values = derive(reach, { http: 8080, https: 443, ...bound });
+
+    expect(values.HTTPS_BIND).toBe("100.64.0.1");
 
     expect(values.COMPOSE_PROFILES).toBe("tls");
     expect(values.HTTPS_PORT).toBe("443");
@@ -186,6 +203,7 @@ describe("choosePorts", () => {
       domain: "firetower.example.com",
       dnsProvider: "cloudflare",
       dnsToken: "a-token",
+      address: "100.64.0.1",
     };
     const ports = await choosePorts(reach, CURRENT, {}, new Set());
 
@@ -404,6 +422,7 @@ describe("changing reach on an existing deployment", () => {
     domain: "firetower.example.com",
     dnsProvider: "cloudflare",
     dnsToken: "a-token",
+    address: "100.64.0.1",
   };
 
   it("adds everything the tls profile needs, and nothing else", () => {
@@ -444,6 +463,10 @@ describe("changing reach on an existing deployment", () => {
     expect(removed).not.toHaveProperty("DNS_PROVIDER");
     expect(removed).not.toHaveProperty("COMPOSE_PROFILES");
     expect(removed).not.toHaveProperty("HTTPS_PORT");
+    // Caddy's bind, with no Caddy. Kept in `OWNED` precisely so that going back
+    // to loopback takes it, rather than leaving a value that reads like a
+    // deployment still listening on a tailnet address.
+    expect(removed).not.toHaveProperty("HTTPS_BIND");
     expect(removed.FIRETOWER_PUBLIC_URL).toBe("http://localhost:8085");
     expect(removed.POSTGRES_PASSWORD).toBe("kept-secret");
   });

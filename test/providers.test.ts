@@ -148,6 +148,7 @@ describe("modules that need a dependency substituted", () => {
         domain: "ft.example.com",
         dnsProvider: "vercel",
         dnsToken: "tok",
+        address: "100.64.0.1",
       },
       { http: 8080, https: 443, configurable: true, bindable: true },
     );
@@ -162,6 +163,7 @@ describe("modules that need a dependency substituted", () => {
         domain: "ft.example.com",
         dnsProvider: "godaddy",
         dnsToken: "key:secret",
+        address: "100.64.0.1",
       },
       { http: 8080, https: 443, configurable: true, bindable: true },
     );
@@ -230,7 +232,13 @@ describe("the Caddyfile shape a provider needs", () => {
 describe("what gets written for a provider with no single token", () => {
   const ports = { http: 8080, https: 443, configurable: true, bindable: true };
   const reach = (dnsProvider: string, dnsToken: string) =>
-    ({ kind: "domain" as const, domain: "ft.example.com", dnsProvider, dnsToken });
+    ({
+      kind: "domain" as const,
+      domain: "ft.example.com",
+      dnsProvider,
+      dnsToken,
+      address: "100.64.0.1",
+    });
 
   it("writes no DNS_API_TOKEN, because there is no token to write", () => {
     // It used to write one anyway, from a prompt the operator was forced to

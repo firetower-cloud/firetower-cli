@@ -34,6 +34,15 @@ export interface Context {
   /** The domain being installed, when `install` is asking. */
   domain?: string | null;
   /**
+   * The address Caddy is bound to, from `HTTPS_BIND`.
+   *
+   * The domain is supposed to point *here* specifically, not merely at one of
+   * this machine's addresses — a deployment bound to a tailnet address whose
+   * name resolves to the VPC address next to it is broken, and looked fine
+   * while the check accepted any local interface.
+   */
+  httpsBind?: string | null;
+  /**
    * The ports this deployment publishes. Absent means the defaults, which is
    * what every deployment older than `HTTP_PORT` has.
    */

@@ -152,23 +152,121 @@ export const registries: Check = {
 };
 
 /**
- * Every address this machine answers on, from its own interfaces.
+ * What an address on this machine is *for*, which is the only thing that makes
+ * one of them a better answer than another.
  *
- * Loopback and the rest of the internal ones are left out: a domain pointing at
- * 127.0.0.1 resolves to *the browser's* machine, not this one, so it is not
- * evidence that this deployment is reachable. It is called out separately
- * below, because it is a specific mistake with a specific remedy.
+ *   * `mesh` — a tailnet or a VPN tunnel. The address other people's laptops
+ *     can reach without anything being published to the internet, which is the
+ *     whole shape the `domain` deployment is for.
+ *   * `private` — an ordinary RFC1918 address. Right for a machine on the
+ *     network its users are on, and wrong for a cloud VM whose VPC nobody is
+ *     peered into. Those two are indistinguishable from here.
+ *   * `public` — routable from the internet. Never the recommended answer.
  */
-export function localAddresses(): string[] {
-  const found = new Set<string>();
+export type AddressKind = "mesh" | "private" | "public";
 
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const address of addresses ?? []) {
-      if (!address.internal) found.add(address.address);
+export interface Candidate {
+  address: string;
+  /** The interface it is on, which is what makes it recognisable to a human. */
+  iface: string;
+  kind: AddressKind;
+}
+
+/**
+ * Interfaces that belong to something other than a network people are on.
+ *
+ * Docker's bridges are the ones that matter. Node marks only loopback as
+ * `internal`, so `docker0` and every Compose bridge come back from
+ * `networkInterfaces()` looking exactly like a NIC — and this deployment
+ * creates several of them. Offering `172.17.0.1` as the address to point a
+ * domain at is offering an address that is unreachable from anywhere,
+ * including from the container that would be answering on it.
+ */
+const NOT_A_NETWORK = /^(docker|br-|veth|virbr|lo|cni|flannel|kube)/;
+
+/** Interfaces that are a tunnel into a network somebody else is also on. */
+const MESH_INTERFACE = /^(tailscale|wg|wt|nebula|zt|tun|utun)/;
+
+/**
+ * Tailscale's range. `100.64.0.0/10` is carrier-grade NAT space, which
+ * Tailscale uses for every node — a stronger signal than an interface name,
+ * because the name is `tailscale0` on Linux and `utun` plus a number on macOS,
+ * where it is indistinguishable from any other tunnel.
+ */
+function octets(address: string): [number, number] {
+  const [a = -1, b = -1] = address.split(".").map(Number);
+  return [a, b];
+}
+
+function isCgnat(address: string): boolean {
+  const [a, b] = octets(address);
+  return a === 100 && b >= 64 && b <= 127;
+}
+
+function isPrivate(address: string): boolean {
+  const [a, b] = octets(address);
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
+/**
+ * Every address this machine answers on that somebody could plausibly reach,
+ * with what each one is.
+ *
+ * Loopback is left out: a domain pointing at 127.0.0.1 resolves to *the
+ * browser's* machine, not this one, so it is not evidence that this deployment
+ * is reachable. Link-local is left out for the same reason. Docker's bridges
+ * are left out because they are not a network at all — see `NOT_A_NETWORK`.
+ *
+ * The classification orders a list and pre-selects an entry. It never decides:
+ * a WireGuard interface somebody named `corp0` is a perfectly good mesh that no
+ * pattern here will recognise, and the cost of that has to be an arrow key
+ * rather than a refusal.
+ */
+export function candidateAddresses(): Candidate[] {
+  const found: Candidate[] = [];
+  const seen = new Set<string>();
+
+  for (const [iface, addresses] of Object.entries(networkInterfaces())) {
+    if (NOT_A_NETWORK.test(iface)) continue;
+
+    for (const entry of addresses ?? []) {
+      const { address } = entry;
+      if (entry.internal) continue;
+      // IPv4 only. An AAAA record is a fine way to reach a machine, but the
+      // records this prints are A records and mixing the two in one list is a
+      // way to have somebody paste a v6 address into an A record.
+      if (!address.includes(".")) continue;
+      if (address.startsWith("169.254.")) continue;
+      if (seen.has(address)) continue;
+      seen.add(address);
+
+      const kind: AddressKind =
+        isCgnat(address) || MESH_INTERFACE.test(iface)
+          ? "mesh"
+          : isPrivate(address)
+            ? "private"
+            : "public";
+
+      found.push({ address, iface, kind });
     }
   }
 
-  return [...found];
+  const rank = { mesh: 0, private: 1, public: 2 };
+
+  return found.sort((a, b) => rank[a.kind] - rank[b.kind]);
+}
+
+/**
+ * Every address this machine answers on, as plain strings.
+ *
+ * Kept for `doctor`, which asks "is this an address this machine has" and does
+ * not care what kind it is.
+ */
+export function localAddresses(): string[] {
+  return candidateAddresses().map((candidate) => candidate.address);
 }
 
 const isLoopbackAddress = (address: string): boolean =>
@@ -215,7 +313,7 @@ export const domainResolves: Check = {
   name: "domain",
   preflight: true,
   deployment: true,
-  async run({ domain }) {
+  async run({ domain, httpsBind }) {
     if (!domain) return ok("domain", "none — reached on loopback");
 
     const addresses = await addressesOf(domain);
@@ -234,7 +332,7 @@ export const domainResolves: Check = {
     const label = `probe-${randomBytes(3).toString("hex")}`;
     const wildcard = (await addressesOf(`${label}.${domain}`)).length > 0;
 
-    const where = await pointsHere(domain, addresses);
+    const where = await pointsHere(domain, addresses, httpsBind ?? null);
 
     if (!wildcard) {
       return warn(
@@ -256,7 +354,27 @@ interface Pointing {
   remedy?: string;
 }
 
-async function pointsHere(domain: string, addresses: string[]): Promise<Pointing> {
+async function pointsHere(
+  domain: string,
+  addresses: string[],
+  httpsBind: string | null,
+): Promise<Pointing> {
+  // Asked first, and asked separately, because "an address on this machine" is
+  // the wrong question once Caddy is held to one interface. A name resolving to
+  // the VPC address beside a tailnet-bound Caddy passes that question and
+  // reaches nothing.
+  if (httpsBind) {
+    if (addresses.includes(httpsBind)) {
+      return { here: true, detail: `${domain} → ${httpsBind}, where Caddy is listening` };
+    }
+
+    return {
+      here: false,
+      detail: `${domain} → ${addresses.join(", ")}, but Caddy is listening on ${httpsBind}`,
+      remedy: `point both records at ${httpsBind}, or change HTTPS_BIND to an address the name already resolves to`,
+    };
+  }
+
   const mine = new Set(localAddresses());
   const matched = addresses.filter((address) => mine.has(address));
 

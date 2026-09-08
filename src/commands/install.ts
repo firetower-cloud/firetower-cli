@@ -21,7 +21,7 @@ import {
   publicUrl,
   stop,
   suppliesOwnCertificate,
-  tunnelCommand,
+  firetowerTunnelCommand,
   type Ports,
   type Reach,
   type ReachOptions,
@@ -35,7 +35,7 @@ import { ui, pc } from "../ui.js";
  * anything, and the two commands agreeing about what a deployment looks like is
  * the whole reason that module exists.
  */
-export { publicUrl, certificate, published, tunnelCommand, type Reach };
+export { publicUrl, certificate, published, firetowerTunnelCommand, type Reach };
 
 export interface InstallOptions extends ReachOptions {
   dir?: string;
@@ -514,19 +514,17 @@ function finish(
   ui.step(pc.bold("Firetower is running."));
   ui.blank();
 
-  // Nothing on this machine's network answers in the `local` shape, so the URL
-  // on its own is not an instruction — it is the second half of one. The step
-  // every operator currently works out for themselves, and gets subtly wrong:
-  // without the keepalives the forward dies silently on sleep or a network
-  // change and does not come back.
-  if (reach.kind === "local") {
-    ui.step("It is on loopback, so reach it from your own machine with a tunnel:");
-    ui.blank();
-    ui.dim(`  ${tunnelCommand(ports.http)}`);
-    ui.blank();
-    ui.step("Then open");
-    ui.blank();
-  }
+  // One screen for both cases, deliberately. This used to say "reach it from
+  // your own machine with a tunnel" unconditionally, which is nonsense when
+  // Firetower has just been installed on the laptop the operator is sitting at
+  // — there is no tunnel and never was.
+  //
+  // Detecting which it is looked easy and is not: `SSH_CONNECTION` and
+  // `SSH_TTY` are the only signals, `sudo` strips both by default, and
+  // `install` is routinely run under sudo. That fails towards "you are local"
+  // on a server, silently, and there is no signal that fails the other way. So
+  // print the URL, then the tunnel as the next step for whoever is not here.
+  // Two extra lines to somebody at the machine, and never wrong.
 
   // Said at the end as well as at the prompt, because the flag path never sees
   // the prompt — `--dns-provider route53` would otherwise finish with "Firetower
@@ -543,6 +541,14 @@ function finish(
 
   ui.dim(`  ${values.FIRETOWER_PUBLIC_URL}`);
   ui.blank();
+
+  if (reach.kind === "local") {
+    ui.step("That works on this machine. From your laptop, bring up a tunnel first:");
+    ui.blank();
+    ui.dim(`  ${firetowerTunnelCommand(ports.http)}`);
+    ui.blank();
+  }
+
   ui.dim(`  username  ${admin.username}`);
   ui.dim(`  password  ${admin.password}`);
   ui.blank();

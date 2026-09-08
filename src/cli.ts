@@ -88,7 +88,8 @@ program
     dnsProvider,
   )
   .option("--dns-token <token>", "API token for --dns-provider")
-  .option("--public-url <url>", "the address your own reverse proxy serves")
+  .option("--https-bind <address>", "the address Caddy listens on, with --domain")
+  .option("--public-url <url>", "not supported yet — see the README")
   .option("--http-port <port>", "publish the control plane here instead of 8080", port)
   .option("--https-port <port>", "publish Caddy here instead of 443, with --domain", port)
   .option("--admin-username <name>", "the first administrator", "admin")
@@ -110,6 +111,7 @@ program
       acmeEmail: options.acmeEmail,
       dnsProvider: options.dnsProvider,
       dnsToken: options.dnsToken,
+      httpsBind: options.httpsBind,
       tag: options.tag,
     });
   });
@@ -140,7 +142,8 @@ program
     dnsProvider,
   )
   .option("--dns-token <token>", "API token for --dns-provider")
-  .option("--public-url <url>", "the address your own reverse proxy serves")
+  .option("--https-bind <address>", "the address Caddy listens on")
+  .option("--public-url <url>", "not supported yet — see the README")
   .option("--none", "remove the domain and go back to loopback")
   .action(async (name, options) => {
     const { dir, yes } = globals();
@@ -151,6 +154,7 @@ program
       publicUrl: options.publicUrl,
       dnsProvider: options.dnsProvider,
       dnsToken: options.dnsToken,
+      httpsBind: options.httpsBind,
       none: options.none,
     });
   });

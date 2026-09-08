@@ -13,12 +13,14 @@ const domain: Reach = {
   domain: "firetower.example.com",
   dnsProvider: "cloudflare",
   dnsToken: "a-token",
+  address: "100.64.0.1",
 };
 const ownCertificate: Reach = {
   kind: "domain",
   domain: "firetower.example.com",
   dnsProvider: "none",
   dnsToken: "",
+  address: "100.64.0.1",
 };
 const proxy: Reach = { kind: "proxy", publicUrl: "https://firetower.example.com" };
 

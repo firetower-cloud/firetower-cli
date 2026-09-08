@@ -18,7 +18,7 @@ import {
   describe,
   infer,
   published,
-  showRecords,
+  printRecords,
   stop,
   suppliesOwnCertificate,
   tunnelCommand,
@@ -190,6 +190,10 @@ function carryForward(options: DomainOptions, before: Reach): DomainOptions {
     domain: options.domain ?? (adjusting && !naming ? before.domain : undefined),
     dnsProvider: options.dnsProvider ?? before.dnsProvider,
     dnsToken: options.dnsToken ?? before.dnsToken,
+    // Same reasoning as the three above, and the same consequence for leaving
+    // it out: `derive` writes `HTTPS_BIND` from this, so rotating a token
+    // without it would rebind Caddy from a tailnet address to every interface.
+    httpsBind: options.httpsBind ?? before.address,
   };
 }
 
@@ -420,7 +424,7 @@ function finish(
     // Repeated at the end as well as before the write, because this is the step
     // that is done somewhere else — in a DNS console — and the one most likely
     // to be missing when somebody reports that it does not work.
-    showRecords(reach.domain);
+    printRecords(reach.domain, reach.address, reach.dnsProvider);
 
     if (!suppliesOwnCertificate(reach)) {
       ui.step("Caddy is asking Let's Encrypt for the certificate now. It takes");
@@ -432,7 +436,8 @@ function finish(
   }
 
   if (reach.kind === "local") {
-    ui.step("It is on loopback again, so reach it with a tunnel:");
+    ui.step("Nothing is published on this machine's network any more. From your");
+    ui.step("laptop, bring up a tunnel first:");
     ui.blank();
     ui.dim(`  ${tunnelCommand(ports.http)}`);
     ui.blank();

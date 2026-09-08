@@ -3,13 +3,14 @@ import * as prompts from "@clack/prompts";
 import * as docker from "./docker.js";
 import * as env from "./env.js";
 import * as services from "./services.js";
-import { localAddresses } from "./checks/machine.js";
+import * as machine from "./checks/machine.js";
 import {
   COMMON,
   KNOWN_REPLACE,
   MULTI_FIELD,
   TOKEN_HINT,
   isKnownProvider,
+  keyUrl,
   isModulePath,
   suggest,
 } from "./providers.js";
@@ -45,6 +46,13 @@ export type Reach =
       dnsProvider: string;
       /** A credential for that provider's API. Empty with `OWN_CERTIFICATE`. */
       dnsToken: string;
+      /**
+       * The address Caddy listens on, and the address both DNS records point
+       * at. One fact, not two: the name is only useful if it resolves to
+       * somewhere the browsers can reach, and Caddy answering anywhere else is
+       * a door nobody asked for. Written to `HTTPS_BIND`.
+       */
+      address: string;
     }
   | { kind: "proxy"; publicUrl: string };
 
@@ -79,6 +87,8 @@ export interface ReachOptions {
   publicUrl?: string;
   dnsProvider?: string;
   dnsToken?: string;
+  /** Which of this machine's addresses Caddy listens on. See `Reach.address`. */
+  httpsBind?: string;
   yes?: boolean;
 }
 
@@ -157,9 +167,10 @@ export async function askReach(options: ReachOptions): Promise<Reach> {
       domain: options.domain.trim(),
       dnsProvider: resolved.provider,
       dnsToken: MULTI_FIELD.has(resolved.provider) ? "" : (options.dnsToken ?? ""),
+      address: bindFromFlags(options),
     };
   }
-  if (options.publicUrl) return { kind: "proxy", publicUrl: trimUrl(options.publicUrl) };
+  if (options.publicUrl) refuseProxy();
 
   // `--domain ""` is how a script says "no domain", and has always meant that.
   if (options.domain === "" || options.yes) return { kind: "local" };
@@ -167,9 +178,26 @@ export async function askReach(options: ReachOptions): Promise<Reach> {
   const choice = await prompts.select({
     message: "How will people reach this Firetower?",
     options: [
-      { value: "local", label: "Only from this machine, over an ssh tunnel  (recommended)" },
-      { value: "domain", label: "On a name, over HTTPS" },
-      { value: "proxy", label: "Behind a reverse proxy I already run" },
+      {
+        value: "local",
+        label: "Only from this machine",
+        // The mechanism goes in the hint rather than the label because it is
+        // not the same mechanism in both cases. Installed on the machine you
+        // are sitting at, there is no tunnel and never was; installed on a
+        // server, there is. The label states the property, which is true of
+        // both: nothing is published to the network.
+        hint: "simplest to start — directly, or with `firetower tunnel` from your laptop",
+      },
+      {
+        value: "domain",
+        label: "Your own domain, over Tailscale or another mesh VPN",
+        hint: "more suited for teams",
+      },
+      {
+        value: "proxy",
+        label: "Behind a reverse proxy I already run",
+        hint: "not supported yet",
+      },
     ],
   });
   if (cancelled(choice)) stop("Nothing was written.");
@@ -177,6 +205,12 @@ export async function askReach(options: ReachOptions): Promise<Reach> {
   if (choice === "local") return { kind: "local" };
 
   if (choice === "domain") {
+    // Asked before the domain, and that order is the point. Somebody with no
+    // reachable address has nothing to gain from typing a name and choosing a
+    // certificate provider first, and this is the question that decides
+    // whether the rest of it can work at all.
+    const address = await askAddress();
+
     const answer = await prompts.text({
       message: "Domain",
       placeholder: "firetower.example.com",
@@ -187,58 +221,195 @@ export async function askReach(options: ReachOptions): Promise<Reach> {
 
     const domain = String(answer).trim();
 
-    // Printed here, before the provider is chosen and long before anything is
-    // written: both records have to exist for this to work, one of them is easy
-    // to forget, and the moment to say so is while the operator is still in
-    // their DNS console rather than after a failed install.
-    showRecords(domain);
-
+    // The provider comes before the records, because the records screen names
+    // it — "create these in GoDaddy" — and because the condition that actually
+    // gates the certificate is about the provider, so it cannot be stated
+    // before there is one.
     const { dnsProvider, dnsToken } = await askCertificate(domain);
 
-    return { kind: "domain", domain, dnsProvider, dnsToken };
+    await showRecords(domain, address, dnsProvider);
+
+    return { kind: "domain", domain, dnsProvider, dnsToken, address };
   }
 
-  // Asked rather than worked out. With their proxy in front, nothing here can
-  // know what it serves — and this is the URL printed at the end and carried in
-  // every notification.
-  const url = await prompts.text({
-    message: "What address will people open?",
-    placeholder: "https://firetower.example.com",
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed) return "The address your proxy serves";
-      if (!/^https?:\/\/[^/]+/.test(trimmed)) return "Starting with http:// or https://";
-      return undefined;
-    },
-  });
-  if (cancelled(url)) stop("Nothing was written.");
+  return refuseProxy();
+}
 
-  return { kind: "proxy", publicUrl: trimUrl(String(url)) };
+/**
+ * The reverse-proxy shape, which is not a shape you can choose any more.
+ *
+ * It was never finished. Firetower serves preview hostnames itself, on the
+ * `Host` header, and `FIRETOWER_PREVIEW_DOMAIN` is only written by the shape
+ * that has a domain — so choosing this one left the server minting
+ * `*.localhost` previews behind a proxy that could not route them. An interface
+ * that works and previews that do not.
+ *
+ * Kept in the menu rather than deleted, because a removed option teaches
+ * nobody anything and takes the signal that somebody wanted it with it.
+ *
+ * `infer` still returns this shape for a deployment that already has one, so
+ * `upgrade` on such a deployment goes on working. The refusal is about
+ * *choosing* it, not about having chosen it.
+ */
+function refuseProxy(): never {
+  ui.blank();
+  ui.step("Firetower serves preview hostnames itself, and routing those through");
+  ui.step("a proxy you already run does not work today.");
+  ui.blank();
+  ui.step("If you want it, say so and it moves up the list:");
+  ui.blank();
+  ui.dim("  https://github.com/firetower-cloud/firetower/issues");
+  ui.blank();
+
+  return stop("Not supported yet. Nothing was written.");
+}
+
+/**
+ * Which of this machine's addresses people will reach it on.
+ *
+ * The question the `domain` shape has always turned on and never asked. It used
+ * to take the first entry off `networkInterfaces()` to print in the DNS records
+ * and write the answer nowhere — so on a cloud VM with a tailnet it suggested
+ * the provider's VPC address, which no laptop outside that VPC can route to,
+ * and Caddy bound `0.0.0.0` regardless.
+ *
+ * Always asked, never inferred, even when there is an obvious answer.
+ * Recognising a mesh interface is a heuristic — a WireGuard link somebody named
+ * `corp0` is a good answer that no pattern will spot — so detection orders the
+ * list and pre-selects the top of it, and being wrong costs an arrow key.
+ */
+export async function askAddress(): Promise<string> {
+  const candidates = machine.candidateAddresses();
+
+  if (candidates.length === 0) noReachableAddress();
+
+  const choice = await prompts.select({
+    message: "Which address will people reach this on?",
+    options: candidates.map((candidate) => ({
+      value: candidate.address,
+      label: `${candidate.address}   ${candidate.iface}`,
+      hint:
+        candidate.kind === "mesh"
+          ? "looks like a mesh VPN"
+          : candidate.kind === "public"
+            ? "public, reachable from the internet"
+            : undefined,
+    })),
+    initialValue: candidates[0]?.address,
+  });
+  if (cancelled(choice)) stop("Nothing was written.");
+
+  ui.blank();
+  ui.step("Your domain will point at this address, and Firetower answers here");
+  ui.step("and nowhere else.");
+  ui.blank();
+  ui.step("Everyone who needs access has to be on the same tailnet — Tailscale");
+  ui.step("installed on their laptop and added to your network. Without it the");
+  ui.step("domain resolves and nothing answers.");
+  ui.blank();
+
+  return String(choice);
+}
+
+/**
+ * There is no address to offer, so there is no domain to configure.
+ *
+ * Only reached when the machine has nothing but loopback — every other case
+ * gets a list, including the one where the only entry is a bad idea. Stopping
+ * here is better than the alternative it replaces, which was to finish the
+ * install, obtain a real certificate and hand over a URL nobody can open.
+ */
+function noReachableAddress(): never {
+  ui.blank();
+  ui.step("A domain needs an address people can reach, and this machine has");
+  ui.step("none that anything outside it can route to.");
+  ui.blank();
+  ui.step("The usual answer is Tailscale:");
+  ui.blank();
+  ui.dim("  curl -fsSL https://tailscale.com/install.sh | sh");
+  ui.dim("  sudo tailscale up");
+  ui.blank();
+  ui.step("Then run `firetower domain` again.");
+  ui.blank();
+  ui.step("Until then `firetower tunnel` works and needs none of this.");
+
+  return stop("Nothing was written.");
+}
+
+/**
+ * The bind address for the flag path, where nobody can be asked.
+ *
+ * `--https-bind` when it is given. Otherwise the single candidate, because
+ * there is nothing to choose between — and a refusal naming the flag when
+ * there is more than one, rather than picking the first and being quietly
+ * wrong on exactly the machines this went wrong on.
+ */
+function bindFromFlags(options: ReachOptions): string {
+  const named = options.httpsBind?.trim();
+  if (named) return named;
+
+  const candidates = machine.candidateAddresses();
+  if (candidates.length === 0) noReachableAddress();
+  if (candidates.length === 1 && candidates[0]) return candidates[0].address;
+
+  return stop(
+    `this machine has several addresses — ${candidates.map((c) => c.address).join(", ")}`,
+    "name the one people will reach it on with --https-bind",
+  );
 }
 
 export const trimUrl = (value: string): string => value.trim().replace(/\/+$/, "");
 
 /**
- * The two records, with this machine's own address filled in where there is one.
+ * The two records, and a gate in front of writing anything.
  *
- * A real address rather than a placeholder: the whole difficulty of this step is
- * that the right answer is usually a *private* address, which is the opposite of
- * what people expect a public name to point at, and printing `10.0.0.5` from
- * this machine's own interfaces is the fastest way to say so.
+ * The address is the one just chosen rather than a guess off the first
+ * interface, and the provider is named because by here it is known — which is
+ * the reason the certificate question moved ahead of this one.
+ *
+ * The gate is not ceremony. Neither record blocks the *certificate*: DNS-01
+ * proves control by writing `_acme-challenge` as TXT, and Let's Encrypt reads
+ * back that and nothing else, so a certificate issues happily for a name with
+ * no A record at all. What the records block is anybody reaching the thing —
+ * and the wildcard blocks previews specifically, which is the half people
+ * forget, because the interface works without it.
  */
-export function showRecords(domain: string): void {
-  const address = localAddresses().find((value) => value.includes(".")) ?? "this machine";
+export function printRecords(domain: string, address: string, provider: string): void {
+  const where = provider === OWN_CERTIFICATE ? "your DNS provider" : providerLabel(provider);
 
   ui.blank();
-  ui.step("Both of these have to exist, pointing at this machine:");
+  ui.step(`Create these DNS records in ${where}:`);
   ui.blank();
   ui.dim(`  ${domain}      A   ${address}`);
   ui.dim(`  *.${domain}    A   ${address}`);
   ui.blank();
-  ui.step("The wildcard is not optional — previews are served on subdomains.");
-  ui.step("A private address is the right answer here, and a public one usually");
-  ui.step("is not: nothing about this has to be reachable from the internet.");
+  ui.step("The wildcard is not optional — previews are served on subdomains, and");
+  ui.step("without it you get an interface that works and previews that do not.");
   ui.blank();
+}
+
+/** `printRecords`, and a gate. Split because the closing screen repeats the
+ * records after everything is written, where there is nothing left to gate. */
+export async function showRecords(
+  domain: string,
+  address: string,
+  provider: string,
+): Promise<void> {
+  printRecords(domain, address, provider);
+
+  const done = await prompts.select({
+    message: "Done?",
+    options: [
+      { value: "yes", label: "Yes, continue" },
+      { value: "no", label: "Not yet — stop, and I will run this again" },
+    ],
+  });
+  if (cancelled(done) || done === "no") stop("Nothing was written.");
+}
+
+/** A provider's display name, falling back to the module name. */
+function providerLabel(provider: string): string {
+  return COMMON.find((entry) => entry.value === provider)?.label ?? provider;
 }
 
 /**
@@ -320,6 +491,22 @@ export async function askCertificate(
   // that says nothing about the format.
   const hint = TOKEN_HINT[provider];
 
+  // Said here rather than earlier, because here is the first point at which it
+  // can be said: the condition is about the provider, and until now there was
+  // not one. This is also the thing that actually stops a certificate being
+  // issued — the API accepts the write, the record never appears in DNS, and
+  // the challenge fails with `No TXT record found` for a record that was
+  // written successfully.
+  ui.blank();
+  ui.step(`Firetower gets the certificate by writing a record through`);
+  ui.step(`${providerLabel(provider)}'s API, so ${domain} has to be hosted there. If its`);
+  ui.step("DNS lives somewhere else the write succeeds and the record never appears.");
+  ui.blank();
+  ui.step("Create a key:");
+  ui.blank();
+  ui.dim(`  ${keyUrl(provider)}`);
+  ui.blank();
+
   const token = await prompts.password({
     message: hint ? `API token for ${provider} — ${hint}` : `API token for ${provider}`,
     validate: (value) => (value ? undefined : "Caddy writes the DNS challenge record with it"),
@@ -396,6 +583,12 @@ export function infer(values: env.Env): Reach {
       domain,
       dnsProvider: (values.DNS_PROVIDER ?? "").trim(),
       dnsToken: values.DNS_API_TOKEN ?? "",
+      // Same round trip, and for the same reason: `HTTPS_BIND` is in
+      // `env.OWNED`, so `upgrade` clears it and writes back whatever `derive`
+      // is given. Not reading it here would delete the bind from a working
+      // deployment on an upgrade that changed nothing else — which is exactly
+      // what happened before it was derived at all.
+      address: (values.HTTPS_BIND ?? "").trim(),
     };
   }
 
@@ -458,6 +651,12 @@ export function derive(reach: Reach, ports: Ports): env.Env {
     // and without this line the server would go on minting `*.localhost`
     // previews that resolve to the browser's own machine.
     ...(reach.kind === "domain" ? { FIRETOWER_PREVIEW_DOMAIN: reach.domain } : {}),
+    // Caddy's interface, and the other half of the address in the records
+    // above. Derived rather than left to the operator: it is in `env.OWNED`, so
+    // a value written by hand was deleted by the next `upgrade` or `domain` and
+    // never written back — silently rebinding Caddy to 0.0.0.0, which on a
+    // machine with a public IP is the whole front door.
+    ...(reach.kind === "domain" && reach.address ? { HTTPS_BIND: reach.address } : {}),
     // Only when the release reads them. Writing a value nothing honours is how
     // somebody ends up sure they changed a port that never moved.
     ...(ports.configurable
@@ -719,6 +918,24 @@ export function publicUrl(reach: Reach, ports: Pick<Ports, "http" | "https">): s
 }
 
 /**
+ * The tunnel, as this CLI's own command rather than as ssh.
+ *
+ * What the closing screen prints. `tunnelCommand` below stays for the one place
+ * that genuinely wants the raw line — `tunnel --ssh-config`, for somebody with
+ * no Node on the machine they are sitting at.
+ *
+ * `--remote-port` is passed explicitly even though `tunnel` can read it off the
+ * remote `.env`, because at this moment we *know* it, and reading it involves
+ * an ssh round trip that fails on a deployment whose `.env` the operator's
+ * account cannot read.
+ */
+export function firetowerTunnelCommand(port: number, destination?: string): string {
+  const target = destination ?? `${userOnThisMachine()}@${hostname()}`;
+
+  return `firetower tunnel ${target} --remote-port ${port}`;
+}
+
+/**
  * The command that actually reaches a loopback install.
  *
  * Both sides on the same number on purpose: it is what makes the address in
@@ -783,7 +1000,11 @@ export function published(reach: Reach, ports: Ports): string {
     : `every interface, on ${ports.http}`;
 
   if (reach.kind === "domain") {
-    return `${control} — and Caddy on ${ports.https} and 80, for everyone else`;
+    // The address, not just the ports. "for everyone else" was true of the
+    // 0.0.0.0 this used to bind, and is the wrong thing to say once Caddy is
+    // held to one interface — the line people read to check that.
+    const where = reach.address || "every interface";
+    return `${control} — and Caddy on ${where}, ports ${ports.https} and 80`;
   }
 
   return control;

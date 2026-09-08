@@ -201,6 +201,34 @@ export const MULTI_FIELD = new Set([
 ]);
 
 /**
+ * Where each provider's credential is created.
+ *
+ * Printed with the token prompt, because "API token for godaddy" is a question
+ * somebody then has to go and find the answer to, and the finding is the slow
+ * part. Only the providers on the shortlist have an entry: there are
+ * ninety-odd caddy-dns modules and a table of ninety-odd guessed URLs would
+ * age into a table of ninety-odd wrong ones. `keyUrl` falls back to the
+ * module's own page, which is at least always right about where to look next.
+ */
+export const KEY_URL: Record<string, string> = {
+  cloudflare: "https://dash.cloudflare.com/profile/api-tokens",
+  digitalocean: "https://cloud.digitalocean.com/account/api/tokens",
+  hetzner: "https://dns.hetzner.com/settings/api-token",
+  vercel: "https://vercel.com/account/tokens",
+  godaddy: "https://classic-developer.godaddy.com/keys",
+  desec: "https://desec.io/tokens",
+  gandi: "https://admin.gandi.net/organizations/account/pat",
+  linode: "https://cloud.linode.com/profile/tokens",
+  vultr: "https://my.vultr.com/settings/#settingsapi",
+  duckdns: "https://www.duckdns.org",
+};
+
+/** Where to get the credential for a provider, named or not. */
+export function keyUrl(provider: string): string {
+  return KEY_URL[provider] ?? `https://github.com/caddy-dns/${provider}`;
+}
+
+/**
  * What the token actually is, where "API token" would send somebody looking for
  * the wrong thing.
  *

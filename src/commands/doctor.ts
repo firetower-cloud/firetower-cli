@@ -30,15 +30,19 @@ export async function doctor(options: DoctorOptions): Promise<void> {
   // The domain the deployment actually uses, so the check is about this
   // installation rather than about nothing.
   let domain: string | null = null;
+  let httpsBind: string | null = null;
   if (dir) {
     try {
-      domain = env.parse(await readFile(join(dir, ".env"), "utf8")).DOMAIN || null;
+      const values = env.parse(await readFile(join(dir, ".env"), "utf8"));
+      domain = values.DOMAIN || null;
+      httpsBind = values.HTTPS_BIND || null;
     } catch {
       domain = null;
+      httpsBind = null;
     }
   }
 
-  const results = await runChecks(checks, { dir, domain });
+  const results = await runChecks(checks, { dir, domain, httpsBind });
 
   if (options.json) {
     ui.json({ dir, status: worst(results), checks: results });
