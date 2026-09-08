@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { awaitCertificates, willObtainCertificate } from "../src/certificates.js";
+import { awaitCertificates, progress, willObtainCertificate } from "../src/certificates.js";
 import type { Reach } from "../src/shape.js";
 
 /**
@@ -177,5 +177,40 @@ describe("when there is nothing to wait for", () => {
     // left for the operator to fill in and no certificate can be issued until
     // they do. `install` says so — and must not then wait for it anyway.
     expect(willObtainCertificate(domain({ dnsProvider: "route53" }))).toBe(false);
+  });
+});
+
+describe("the spinner line", () => {
+  /**
+   * One line, always.
+   *
+   * This was a small table of the two certificates, and clack's spinner cannot
+   * repaint one: it redraws by moving the cursor up a fixed number of lines, so
+   * anything taller scrolls instead of updating and the terminal fills with
+   * copies of itself. Every second, for as long as the wait lasts.
+   */
+  it("never contains a newline", () => {
+    for (const elapsed of [0, 30_000, 95_000, 400_000]) {
+      const line = progress(["example.test", "*.example.test"], elapsed);
+
+      expect(line).not.toContain("\n");
+    }
+  });
+
+  it("names what is still outstanding", () => {
+    expect(progress(["*.example.test"], 1000)).toContain("*.example.test");
+    expect(progress(["*.example.test"], 1000)).not.toContain(" example.test,");
+  });
+
+  it("explains itself only once the wait is long enough to need it", () => {
+    // A sentence about DNS providers on a twelve-second Cloudflare install is
+    // noise; on a three-minute GoDaddy one it is the whole answer.
+    expect(progress(["example.test"], 10_000)).not.toContain("retry");
+    expect(progress(["example.test"], 120_000)).toContain("retry");
+  });
+
+  it("reads as minutes once it is minutes", () => {
+    expect(progress(["example.test"], 30_000)).toContain("(30s)");
+    expect(progress(["example.test"], 125_000)).toContain("(2m5s)");
   });
 });
