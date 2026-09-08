@@ -146,6 +146,15 @@ Four things go with it:
    life. `firetower doctor` reports the expiry and says who is responsible for
    it.
 
+**Slow providers.** Some serve a record minutes after their API accepts it, and
+Caddy asks Let's Encrypt to validate within seconds — so the challenge fails
+with `No TXT record found` for a record that was written successfully, which
+reads like a bad token. GoDaddy is the measured case: a wildcard failed four
+times at 12-17 seconds and succeeded at 124. `install` writes
+`propagation_delay`, `propagation_timeout`, `dns_ttl` and `resolvers` into the
+`Caddyfile` for the providers known to need it, so there is nothing to do. For
+one that is not on that list, the file says which lines to add.
+
 **Every** module under [github.com/caddy-dns](https://github.com/caddy-dns)
 works — all ninety-odd of them — and the CLI knows their names. The interactive
 prompt lists the dozen that take a single API token and lets you type any of the

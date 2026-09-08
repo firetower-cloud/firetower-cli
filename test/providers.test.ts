@@ -9,6 +9,7 @@ import {
   TOKEN_HINT,
   isKnownProvider,
   providerBlock,
+  propagationSettings,
   suggest,
 } from "../src/providers.js";
 import { derive, resolveProvider } from "../src/shape.js";
@@ -195,7 +196,9 @@ describe("the Caddyfile shape a provider needs", () => {
   it("ships the one-line form, which is right for a single-token provider", () => {
     expect(caddyfile).toContain(ONE_LINE);
     expect(withProviderBlock(caddyfile, "cloudflare")).toBe(caddyfile);
-    expect(withProviderBlock(caddyfile, "godaddy")).toBe(caddyfile);
+    // GoDaddy keeps the one-line form too — what it gains is the propagation
+    // settings below it, which is a different edit in the same place.
+    expect(withProviderBlock(caddyfile, "godaddy")).toContain(ONE_LINE);
   });
 
   it("replaces it with a block for a provider that takes several values", () => {
@@ -251,5 +254,51 @@ describe("what gets written for a provider with no single token", () => {
 
   it("still writes one for a provider that has one", () => {
     expect(derive(reach("godaddy", "key:secret"), ports).DNS_API_TOKEN).toBe("key:secret");
+  });
+});
+
+/**
+ * The settings a slow DNS provider needs, written rather than suggested.
+ *
+ * A GoDaddy wildcard failed four times at 12-17 seconds and succeeded at 124.
+ * The settings that fix it existed as a comment in the Caddyfile, which is a
+ * thing you find *after* losing the hour — and the failure presents as an
+ * authentication problem, so the hour goes on the token.
+ */
+describe("propagation settings", () => {
+  const CADDYFILE = readFileSync(
+    join(import.meta.dirname, "..", "fallback", "Caddyfile"),
+    "utf8",
+  );
+
+  it("writes them live for a provider known to be slow", () => {
+    const written = withProviderBlock(CADDYFILE, "godaddy");
+
+    expect(written).toContain("\n\t\tpropagation_delay 2m");
+    expect(written).toContain("\n\t\tpropagation_timeout 10m");
+    expect(written).toContain("\n\t\tresolvers 1.1.1.1 8.8.8.8");
+  });
+
+  it("gives dns_ttl its unit, because a bare number takes the proxy down", () => {
+    // `600` is not a duration. Caddy rejects the whole config rather than the
+    // line, so the proxy does not start at all.
+    expect(withProviderBlock(CADDYFILE, "godaddy")).toContain("\n\t\tdns_ttl 600s");
+    expect(withProviderBlock(CADDYFILE, "godaddy")).not.toMatch(/dns_ttl \d+$/m);
+  });
+
+  it("writes none of it for a provider that does not need it", () => {
+    // Two minutes of nothing at every install is the cost of a false entry on
+    // that list, so it stays short.
+    const written = withProviderBlock(CADDYFILE, "cloudflare");
+
+    expect(written).not.toContain("\n\t\tpropagation_delay");
+    expect(written).toBe(CADDYFILE);
+  });
+
+  it("still writes the provider block for one that needs both", () => {
+    // Nothing on the slow list is multi-field today, but the two edits share a
+    // line and must not silently drop one another.
+    expect(propagationSettings("route53")).toEqual([]);
+    expect(withProviderBlock(CADDYFILE, "route53")).toContain("dns {$DNS_PROVIDER} {\n");
   });
 });

@@ -271,6 +271,58 @@ export const KNOWN_REPLACE: Record<string, string> = {
 };
 
 /**
+ * Providers whose API accepts a record minutes before their nameservers serve
+ * it.
+ *
+ * Caddy asks Let's Encrypt to validate within seconds of writing the challenge
+ * record, so against one of these the challenge fails with `No TXT record
+ * found` for a record that was written successfully — which reads as a bad
+ * token or the wrong zone, and is neither.
+ *
+ * Measured, not assumed, and short on purpose. GoDaddy is the one this list
+ * exists for: a wildcard issuance failed four times at 12-17 seconds and
+ * succeeded at 124. Namecheap and OVH are here on the strength of the same
+ * failure being reported against them repeatedly. Anything else stays off it
+ * until somebody sees it, because the cost of a false entry is two minutes of
+ * nothing at every install.
+ */
+export const SLOW_PROPAGATION = new Set(["godaddy", "namecheap", "ovh"]);
+
+/**
+ * The `tls` settings a provider needs beyond naming itself.
+ *
+ * Written live rather than as a comment, because a comment is something you
+ * find *after* losing an hour to the failure it describes — and this one
+ * presents as an authentication problem, so the hour goes on the token.
+ *
+ * `resolvers` is scoped to these providers rather than set for everybody. It
+ * points the propagation check at a public resolver instead of the machine's
+ * own, which on a cloud VM is the provider's caching metadata server and can
+ * answer from cache that a record has propagated when it has not. Right here,
+ * and a regression on a network that only permits its own DNS — so it goes
+ * where there is a failure to justify it.
+ *
+ * `dns_ttl` carries a trap worth avoiding by writing it out: a bare `600` is
+ * not a duration, and Caddy refuses the entire config rather than that one
+ * line, which takes the proxy down instead of degrading it. 600s is also
+ * GoDaddy's floor, which it silently coerces a shorter TTL to anyway.
+ */
+export function propagationSettings(provider: string): string[] {
+  if (!SLOW_PROPAGATION.has(provider)) return [];
+
+  return [
+    "",
+    `\t\t# ${provider} serves a record minutes after its API accepts one. Without`,
+    "\t\t# these, Caddy validates within seconds and the challenge fails with",
+    "\t\t# `No TXT record found` for a record that was written.",
+    "\t\tpropagation_delay 2m",
+    "\t\tpropagation_timeout 10m",
+    "\t\tdns_ttl 600s",
+    "\t\tresolvers 1.1.1.1 8.8.8.8",
+  ];
+}
+
+/**
  * The Caddyfile `tls` body for a provider, which is not the same shape for all
  * of them.
  *

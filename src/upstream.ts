@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { providerBlock } from "./providers.js";
+import { propagationSettings, providerBlock } from "./providers.js";
 
 /**
  * The deployment files, from the repository that owns them.
@@ -162,12 +162,16 @@ export async function deployment(options: FetchOptions = {}): Promise<Deployment
  * carry that line at all.
  */
 export function withProviderBlock(caddyfile: string, provider: string): string {
-  const block = providerBlock(provider);
   const oneLine = "dns {$DNS_PROVIDER} {env.DNS_API_TOKEN}";
+  if (!caddyfile.includes(oneLine)) return caddyfile;
 
-  if (block === oneLine || !caddyfile.includes(oneLine)) return caddyfile;
+  // Both edits land in the same place and are made together, so that what is
+  // on disk after `install` is what Caddy reads and what the operator edits
+  // afterwards. `upgrade` never touches this file, so both survive.
+  const written = [providerBlock(provider), ...propagationSettings(provider)].join("\n");
+  if (written === oneLine) return caddyfile;
 
-  return caddyfile.replace(oneLine, block);
+  return caddyfile.replace(oneLine, written);
 }
 
 /**
