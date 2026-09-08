@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import * as prompts from "@clack/prompts";
 import { MULTI_FIELD } from "./providers.js";
 import { suppliesOwnCertificate, type Reach } from "./shape.js";
-import { ui, pc } from "./ui.js";
+import { ui } from "./ui.js";
 
 /**
  * Waiting for Caddy to have a certificate, before saying the deployment is up.
@@ -189,8 +189,15 @@ export async function awaitCertificates(options: WaitOptions): Promise<Waited> {
   const started = Date.now();
   const done = new Set<string>();
 
-  const spinner = options.quiet ? null : prompts.spinner();
-  spinner?.start("Waiting for certificates — this is Let's Encrypt, not us");
+  // No spinner where it cannot repaint. Clack moves the cursor to redraw its
+  // line, which a pipe, a CI log or `--json` turns into one line per tick.
+  const animated = !options.quiet && process.stderr.isTTY;
+  const spinner = animated ? prompts.spinner() : null;
+
+  spinner?.start("Waiting for certificates");
+  if (!animated && !options.quiet) {
+    ui.step("Waiting for certificates — Let's Encrypt, not us. Up to a few minutes.");
+  }
 
   for (;;) {
     for (const target of targets) {
@@ -210,41 +217,31 @@ export async function awaitCertificates(options: WaitOptions): Promise<Waited> {
       return { ready: false, missing };
     }
 
-    spinner?.message(progress(targets, done, elapsed));
+    spinner?.message(progress(missing, elapsed));
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
 }
 
 /**
- * The line under the spinner: which certificate, and once it is slow, why.
+ * One line. Never more.
  *
- * The explanation is held back for ninety seconds because most installs never
- * need it, and a paragraph about GoDaddy's API on a Cloudflare install that
- * finished in twelve seconds is noise.
+ * This was a small table, and clack's spinner cannot repaint one: it redraws by
+ * moving the cursor up a fixed number of lines, so anything taller than a line
+ * scrolls instead of updating and the terminal fills with copies. Whatever is
+ * said here has to fit on the line the spinner owns.
  */
-function progress(
-  targets: { label: string }[],
-  done: Set<string>,
-  elapsed: number,
-): string {
-  const lines = targets.map(
-    (target) =>
-      `${target.label.padEnd(24)} ${done.has(target.label) ? pc.green("✓") : pc.dim("obtaining")}`,
-  );
+export function progress(pending: string[], elapsed: number): string {
+  const waiting = `Waiting for certificates (${elapsed >= 60000 ? `${Math.floor(elapsed / 60000)}m${Math.round((elapsed % 60000) / 1000)}s` : `${Math.round(elapsed / 1000)}s`})`;
+  const names = pending.join(", ");
 
-  if (elapsed >= EXPLAIN_AFTER_MS) {
-    lines.push("");
-    lines.push(
-      pc.dim("both certificates prove themselves at the same DNS record, so on"),
-    );
-    lines.push(
-      pc.dim("some providers one of them needs a retry — a minute or two more"),
-    );
-  }
+  // Held back, because most installs never wait long enough to need it and a
+  // sentence about DNS providers on a twelve-second install is noise.
+  const why =
+    elapsed >= EXPLAIN_AFTER_MS
+      ? " — both prove themselves at the same DNS record, so one often needs a retry"
+      : "";
 
-  return [`Waiting for certificates (${Math.round(elapsed / 1000)}s)`, "", ...lines].join(
-    "\n  ",
-  );
+  return `${waiting} — ${names}${why}`;
 }
 
 /** What to say when the wait ran out. Caddy has not given up, so nor do we. */
