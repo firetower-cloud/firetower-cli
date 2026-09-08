@@ -26,6 +26,12 @@ import {
   type Reach,
   type ReachOptions,
 } from "../shape.js";
+import {
+  awaitCertificates,
+  reportMissing,
+  willObtainCertificate,
+  type Waited,
+} from "../certificates.js";
 import { ui, pc } from "../ui.js";
 
 /**
@@ -185,7 +191,14 @@ export async function install(options: InstallOptions): Promise<void> {
   await backUpTheKey(secrets.FIRETOWER_ROOT_KEY, directory, options);
   await rememberDir(directory);
 
+  // Between "the containers are healthy" and "somebody can open this" there is
+  // a gap, and on some providers it is minutes long. Finishing inside it prints
+  // a URL that answers a browser with ERR_SSL_PROTOCOL_ERROR.
+  const waited = await waitForCertificates(reach, ports);
+
   finish(values, admin, reach, ports);
+
+  if (waited?.ready === false) reportMissing(directory, waited.missing);
 }
 
 /**
@@ -462,6 +475,25 @@ async function pull(directory: string): Promise<void> {
   if (plain.exitCode === 0) return;
 
   ui.warn("could not pull every image up front", "carrying on — `up` pulls what it needs");
+}
+
+/**
+ * Hold the ending until Caddy can actually serve the URL about to be printed.
+ *
+ * Only where there is a certificate coming — see `willObtainCertificate`. The
+ * bind is `HTTPS_BIND`, because that is the only address Caddy answers on and
+ * loopback is not it.
+ */
+async function waitForCertificates(reach: Reach, ports: Ports): Promise<Waited | null> {
+  if (!willObtainCertificate(reach) || reach.kind !== "domain") return null;
+
+  ui.blank();
+
+  return awaitCertificates({
+    host: reach.address,
+    port: ports.https,
+    domain: reach.domain,
+  });
 }
 
 /**

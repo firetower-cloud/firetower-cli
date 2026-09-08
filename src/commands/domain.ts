@@ -25,6 +25,7 @@ import {
   type Reach,
   type ReachOptions,
 } from "../shape.js";
+import { awaitCertificates, reportMissing, willObtainCertificate } from "../certificates.js";
 import { ui, pc } from "../ui.js";
 
 /**
@@ -157,7 +158,17 @@ export async function domain(options: DomainOptions): Promise<void> {
 
   await restart(dir, deployment.compose, next, reach);
 
+  // The path this matters most on. `firetower domain` is what somebody runs to
+  // put a name on a working deployment, and it used to hand back a URL that
+  // failed for the next couple of minutes.
+  const waited =
+    willObtainCertificate(reach) && reach.kind === "domain"
+      ? await awaitCertificates({ host: reach.address, port: ports.https, domain: reach.domain })
+      : null;
+
   finish(dir, reach, ports, next);
+
+  if (waited?.ready === false) reportMissing(dir, waited.missing);
 }
 
 /**
@@ -426,13 +437,6 @@ function finish(
     // to be missing when somebody reports that it does not work.
     printRecords(reach.domain, reach.address, reach.dnsProvider);
 
-    if (!suppliesOwnCertificate(reach)) {
-      ui.step("Caddy is asking Let's Encrypt for the certificate now. It takes");
-      ui.step("a minute or so, and needs those records in place first:");
-      ui.blank();
-      ui.dim(`  firetower --dir ${dir} logs caddy`);
-      ui.blank();
-    }
   }
 
   if (reach.kind === "local") {
