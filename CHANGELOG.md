@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.1](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.0...v0.11.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* keep the certificate wait to one line ([495116c](https://github.com/firetower-cloud/firetower-cli/commit/495116cbe67a24f0f0e6f09b53c99e7d38d195d1))
+* keep the certificate wait to one line ([70a83f1](https://github.com/firetower-cloud/firetower-cli/commit/70a83f155706bfc5d0b802342df5756ed7a6a519))
+
 ## [0.11.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.10.1...v0.11.0) (2026-09-08)
 
 
