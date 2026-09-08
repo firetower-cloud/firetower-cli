@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/firetower-cloud/firetower-cli/compare/v0.10.0...v0.10.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* write the propagation settings a slow DNS provider needs ([554bfbd](https://github.com/firetower-cloud/firetower-cli/commit/554bfbd17185a8fcd1bf5e1ce30762c8c0709252))
+
 ## [0.10.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.9.0...v0.10.0) (2026-09-08)
 
 
