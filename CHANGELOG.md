@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.9.0...v0.10.0) (2026-09-08)
+
+
+### Features
+
+* ask which address a domain deployment is reached on ([d373ea5](https://github.com/firetower-cloud/firetower-cli/commit/d373ea50e4d7ab1ce806e4a9e9e33515caf22b06))
+
 ## [0.9.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.8.0...v0.9.0) (2026-09-08)
 
 
