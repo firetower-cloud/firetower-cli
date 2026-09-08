@@ -80,7 +80,13 @@ export function resolve(compose: string): Services {
   return {
     control,
     database: by((image) => /(^|\/)postgres[:@]/.test(image)) ?? FALLBACK.database,
-    proxy: by((image) => /(^|\/)(caddy|nginx|traefik)[:@]/.test(image)),
+    // A tag is optional here, unlike the two above, because the proxy is the
+    // one service that is **built** rather than pulled: Caddy resolves DNS
+    // providers as compiled-in modules, so the `tls` profile builds its own
+    // image and names it `firetower-caddy` — no registry, and no tag unless
+    // somebody adds one. Anchoring on `[:@]` alone found nothing there, and a
+    // null proxy is a `doctor` that quietly stops reporting the certificate.
+    proxy: by((image) => /(^|[/-])(caddy|nginx|traefik)([:@]|$)/.test(image)),
     all: names,
   };
 }
@@ -170,6 +176,32 @@ export function portsAreConfigurable(compose: string): boolean {
  */
 export function bindIsConfigurable(compose: string): boolean {
   return publishedPorts(compose).some((entry) => entry.includes("${HTTP_BIND"));
+}
+
+/**
+ * Whether this compose file can obtain a certificate at all.
+ *
+ * The same shape of question as `portsAreConfigurable`, and asked for the same
+ * reason: the CLI writes whatever compose file the current release publishes,
+ * and one from before DNS-01 terminates TLS with a certificate the operator
+ * supplies and reads no DNS_PROVIDER anywhere. Answering the provider question
+ * against such a file would write a module name and an API token into `.env`
+ * that nothing reads, and leave somebody certain they had configured automatic
+ * renewal that was never going to happen.
+ */
+export function obtainsCertificates(compose: string): boolean {
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    // Unreadable is not evidence either way, and the honest answer is the one
+    // that does not claim a capability. `install` treats this as "cannot".
+    return false;
+  }
+
+  return Object.values(services).some((service) =>
+    JSON.stringify(service).includes("${DNS_PROVIDER"),
+  );
 }
 
 /**

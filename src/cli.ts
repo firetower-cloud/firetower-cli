@@ -5,12 +5,14 @@ import { findDeployment } from "./config.js";
 import { cliVersion } from "./version.js";
 import { gate } from "./selfcheck.js";
 import { install } from "./commands/install.js";
+import { domain } from "./commands/domain.js";
 import { tunnel } from "./commands/tunnel.js";
 import { upgrade } from "./commands/upgrade.js";
 import { status } from "./commands/status.js";
 import { doctor } from "./commands/doctor.js";
 import * as lifecycle from "./commands/lifecycle.js";
 import * as worker from "./commands/worker/index.js";
+import { resolveProvider } from "./shape.js";
 import { ui, pc } from "./ui.js";
 
 const program = new Command();
@@ -61,10 +63,31 @@ const port = (value: string): number => {
   return parsed;
 };
 
+/**
+ * A provider name, checked before commander hands it on.
+ *
+ * The value is compiled into Caddy, so an unchecked typo is not a bad
+ * credential — it is `go: module github.com/caddy-dns/cloudflares: not found`,
+ * minutes into a build. `resolveProvider` knows every caddy-dns module and
+ * suggests the closest one.
+ */
+const dnsProvider = (value: string): string => {
+  const resolved = resolveProvider(value);
+  if ("problem" in resolved) throw new InvalidArgumentError(resolved.problem);
+
+  return resolved.provider;
+};
+
 program
   .command("install")
   .description("install the control plane on this machine")
-  .option("--domain <domain>", "serve on this name, with a certificate you put in ./certs")
+  .option("--domain <domain>", "serve on this name, over HTTPS")
+  .option(
+    "--dns-provider <module>",
+    "obtain the certificate over DNS-01 with this caddy-dns module, e.g. cloudflare",
+    dnsProvider,
+  )
+  .option("--dns-token <token>", "API token for --dns-provider")
   .option("--public-url <url>", "the address your own reverse proxy serves")
   .option("--http-port <port>", "publish the control plane here instead of 8080", port)
   .option("--https-port <port>", "publish Caddy here instead of 443, with --domain", port)
@@ -85,6 +108,8 @@ program
       httpsPort: options.httpsPort,
       adminUsername: options.adminUsername,
       acmeEmail: options.acmeEmail,
+      dnsProvider: options.dnsProvider,
+      dnsToken: options.dnsToken,
       tag: options.tag,
     });
   });
@@ -102,6 +127,31 @@ program
       localPort: options.localPort,
       remotePort: options.remotePort,
       sshConfig: options.sshConfig,
+    });
+  });
+
+program
+  .command("domain")
+  .description("change how an existing deployment is reached")
+  .argument("[domain]", "serve on this name, over HTTPS")
+  .option(
+    "--dns-provider <module>",
+    "obtain the certificate over DNS-01 with this caddy-dns module, e.g. cloudflare",
+    dnsProvider,
+  )
+  .option("--dns-token <token>", "API token for --dns-provider")
+  .option("--public-url <url>", "the address your own reverse proxy serves")
+  .option("--none", "remove the domain and go back to loopback")
+  .action(async (name, options) => {
+    const { dir, yes } = globals();
+    await domain({
+      dir,
+      yes,
+      domain: name,
+      publicUrl: options.publicUrl,
+      dnsProvider: options.dnsProvider,
+      dnsToken: options.dnsToken,
+      none: options.none,
     });
   });
 

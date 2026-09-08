@@ -21,7 +21,7 @@ export default {
       2,
       "always",
       [
-        "install", "upgrade", "worker", "doctor", "status", "backup",
+        "install", "upgrade", "domain", "worker", "doctor", "status", "backup",
         "env", "ci", "deps", "main",
       ],
     ],

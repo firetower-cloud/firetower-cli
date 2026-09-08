@@ -171,3 +171,26 @@ describe("the database password", () => {
     expect(env.generatePassword().length).toBeGreaterThanOrEqual(32);
   });
 });
+
+describe("display", () => {
+  it("hides the DNS token, which is the one owned value that is a credential", () => {
+    // `changes` feeds a block the operator reads before confirming, and adding
+    // a domain to an existing deployment writes a token into it. Printing it
+    // would put a credential that can edit DNS for the zone into a terminal's
+    // scrollback and into any CI log capturing the run.
+    expect(env.display("DNS_API_TOKEN", "v1t0K3n_secret")).not.toContain("secret");
+    expect(env.display("DNS_API_TOKEN", "v1t0K3n_secret")).toBe("••••••••");
+  });
+
+  it("still says whether it was there at all", () => {
+    // "unset → ••••••••" and "•••••••• → unset" are the two changes worth
+    // seeing, and neither leaks the value.
+    expect(env.display("DNS_API_TOKEN", undefined)).toBe("unset");
+    expect(env.display("DNS_API_TOKEN", "")).toBe("empty");
+  });
+
+  it("shows everything else as it is", () => {
+    expect(env.display("DOMAIN", "firetower.example.com")).toBe("firetower.example.com");
+    expect(env.display("DNS_PROVIDER", "cloudflare")).toBe("cloudflare");
+  });
+});

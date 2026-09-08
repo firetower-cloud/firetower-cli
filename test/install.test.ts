@@ -8,7 +8,18 @@ import { publicUrl, certificate, published, type Reach } from "../src/commands/i
  */
 
 const local: Reach = { kind: "local" };
-const domain: Reach = { kind: "domain", domain: "firetower.example.com" };
+const domain: Reach = {
+  kind: "domain",
+  domain: "firetower.example.com",
+  dnsProvider: "cloudflare",
+  dnsToken: "a-token",
+};
+const ownCertificate: Reach = {
+  kind: "domain",
+  domain: "firetower.example.com",
+  dnsProvider: "none",
+  dnsToken: "",
+};
 const proxy: Reach = { kind: "proxy", publicUrl: "https://firetower.example.com" };
 
 const bound = { configurable: true, bindable: true };
@@ -44,16 +55,30 @@ describe("publicUrl", () => {
 });
 
 describe("certificate", () => {
-  it("says who holds it, in each of the three shapes", () => {
+  it("says who holds it, in each of the shapes", () => {
     expect(certificate(local)).toBe("none — plain HTTP, on loopback only");
-    expect(certificate(domain)).toBe("yours, from ./certs — see the Caddyfile");
     expect(certificate(proxy)).toBe("yours — Firetower serves plain HTTP");
   });
 
-  it("never promises a certificate Firetower would have to be exposed to get", () => {
-    // `domain` used to mean Let's Encrypt, which meant answering a challenge
-    // from the internet — with the vault behind it.
-    for (const reach of [local, domain, proxy]) {
+  it("names the provider and says Caddy renews it", () => {
+    // The summary block is where somebody checks they answered as they meant
+    // to, so it has to name the provider they chose — and say that renewal is
+    // not theirs, which is the whole point of the change.
+    expect(certificate(domain)).toBe(
+      "Let's Encrypt, over DNS-01 through cloudflare — renewed by Caddy",
+    );
+  });
+
+  it("still says renewal is yours when you supply the certificate", () => {
+    expect(certificate(ownCertificate)).toBe("yours, from ./certs — nothing renews it for you");
+  });
+
+  it("never says Let's Encrypt for a shape that would have to be exposed to get one", () => {
+    // The rule this replaces was "never Let's Encrypt at all", because it meant
+    // answering a challenge from the internet with the vault behind it. DNS-01
+    // is answered outbound, so naming Let's Encrypt is now correct — but only
+    // where a DNS provider is doing the answering. Nowhere else.
+    for (const reach of [local, proxy, ownCertificate]) {
       expect(certificate(reach)).not.toMatch(/let's encrypt/i);
     }
   });

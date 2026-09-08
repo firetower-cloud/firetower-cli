@@ -239,16 +239,23 @@ const isLoopback = (bind: string): boolean =>
   bind === "127.0.0.1" || bind === "::1" || bind.startsWith("127.");
 
 /**
- * How long the certificate has left.
+ * How long the certificate has left, and **who is going to do something about
+ * it** — which is now two different answers.
  *
- * Firetower does not obtain one and so cannot renew one: getting a certificate
- * automatically means answering a challenge from a public authority, which
- * means putting the control plane where that authority can reach it. The trade
- * is a certificate the operator supplies — and the cost of that trade is that
- * nothing renews it.
+ * With a DNS provider configured, Caddy obtained the certificate over DNS-01
+ * and renews it unattended at about two-thirds of its life. There is nothing
+ * for the operator to do, so saying "nothing renews this for you" would be
+ * false, and saying it three weeks out would be false and alarming. What is
+ * still worth reporting is the date: a renewal can fail — a rotated API token,
+ * a zone moved to another provider — and the expiry is where that first shows.
  *
- * So this is the only thing watching. Three weeks is enough notice to mint a
- * new one without hurrying, and short enough that it is not warning for months.
+ * With `DNS_PROVIDER=none` the old reading holds exactly: the certificate came
+ * from the operator, nothing here renews it, and three weeks is enough notice
+ * to mint another without hurrying.
+ *
+ * The certificate Caddy obtains is not on disk anywhere this can read — it is
+ * in the `caddy_data` volume, not `certs/` — so the two paths do not even look
+ * in the same place.
  */
 export const certificateExpiry: Check = {
   name: "certificate",
@@ -262,6 +269,9 @@ export const certificateExpiry: Check = {
     // No proxy means no certificate to have an opinion about: the control
     // plane is on loopback and reached through a tunnel.
     if (!deployment.env.DOMAIN) return ok("certificate", "none — reached on loopback");
+
+    const provider = (deployment.env.DNS_PROVIDER ?? "").trim();
+    if (provider && provider !== "none") return await issuedByCaddy(dir, deployment, provider);
 
     const path = join(dir, "certs", "fullchain.pem");
     const notAfter = await expiryOf(path);
@@ -282,7 +292,7 @@ export const certificateExpiry: Check = {
       return warn(
         "certificate",
         `${days} day${days === 1 ? "" : "s"} left, expires ${when}`,
-        "nothing renews this for you — mint a new one and copy it into certs/",
+        "you supply this one, and nothing renews it — mint a new one and copy it into certs/, or set DNS_PROVIDER in .env and let Caddy obtain it",
       );
     }
 
@@ -298,13 +308,119 @@ export const certificateExpiry: Check = {
  * `null` covers both "no file" and "no openssl" — neither is a certificate
  * this can vouch for, and the remedy is the same either way.
  */
+/**
+ * The expiry of a certificate Caddy is managing, read from Caddy rather than
+ * from disk.
+ *
+ * `certs/` is empty in this shape, so the file this check used to read does not
+ * exist and its absence means nothing. The certificate lives in the
+ * `caddy_data` volume under a path that includes the issuer and the account, so
+ * it is found rather than constructed.
+ *
+ * Unreadable is `ok`, not a failure: a proxy that is not running, or a Caddy
+ * without the shell to look, is not evidence of an expiring certificate — and
+ * `containers` is the check that reports a proxy that is down.
+ */
+async function issuedByCaddy(
+  dir: string,
+  deployment: Awaited<ReturnType<typeof openDeployment>>,
+  provider: string,
+): Promise<Awaited<ReturnType<Check["run"]>>> {
+  const proxy = deployment.services.proxy;
+  const renewer = `Caddy renews it, over DNS-01 through ${provider}`;
+
+  if (!proxy) return ok("certificate", renewer);
+
+  // Caddy's own layout: /data/caddy/certificates/<issuer>/<subject>/<subject>.crt.
+  // Bounded rather than unbounded because this is read into memory, and a
+  // `cat` of something unexpected should not be.
+  const found = await docker.compose(
+    { dir },
+    "exec",
+    "-T",
+    proxy,
+    "sh",
+    "-c",
+    "cat /data/caddy/certificates/*/*/*.crt 2>/dev/null | head -c 200000",
+  );
+
+  const bundle = String(found.stdout ?? "").trim();
+  if (found.exitCode !== 0 || !bundle.includes("BEGIN CERTIFICATE")) {
+    // Nothing issued yet is the normal state for the first minutes of a new
+    // deployment, and `firetower logs caddy` is where an issuance that keeps
+    // failing actually says why.
+    return ok("certificate", `${renewer} — none issued yet`);
+  }
+
+  // **The earliest of them, not the first.** There are normally two here —
+  // Caddy orders the bare name and the wildcard separately — and they do not
+  // expire together. Reporting whichever the shell glob happened to list first
+  // would be a date that is right half the time, and silent about the one that
+  // is actually about to lapse.
+  const notAfter = await earliestExpiry(bundle);
+  if (notAfter === null) return ok("certificate", renewer);
+
+  const days = Math.floor((notAfter.getTime() - Date.now()) / 86_400_000);
+  const when = notAfter.toISOString().slice(0, 10);
+
+  if (days < 0) {
+    return fail(
+      "certificate",
+      `expired on ${when}, and Caddy has not replaced it`,
+      "firetower logs caddy — renewal has been failing, usually a DNS_API_TOKEN that no longer works",
+    );
+  }
+
+  // Well inside what Caddy renews at, so reaching this is a renewal that is
+  // not happening rather than a certificate that is merely getting on.
+  if (days < 14) {
+    return warn(
+      "certificate",
+      `${days} day${days === 1 ? "" : "s"} left, expires ${when}`,
+      "Caddy renews at about a third of the life remaining, so this is late — check `firetower logs caddy`",
+    );
+  }
+
+  return ok("certificate", `${days} days left, expires ${when} — ${renewer}`);
+}
+
+/** Every PEM certificate in a concatenated bundle. */
+function certificatesIn(bundle: string): string[] {
+  return [...bundle.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g)].map(
+    (match) => match[0],
+  );
+}
+
+async function earliestExpiry(bundle: string): Promise<Date | null> {
+  const dates: Date[] = [];
+
+  for (const pem of certificatesIn(bundle)) {
+    const result = await execa("openssl", ["x509", "-enddate", "-noout"], {
+      input: pem,
+      reject: false,
+    });
+    if (result.exitCode !== 0) continue;
+
+    const parsed = parseNotAfter(String(result.stdout));
+    if (parsed) dates.push(parsed);
+  }
+
+  if (dates.length === 0) return null;
+
+  return dates.reduce((earliest, date) => (date < earliest ? date : earliest));
+}
+
 async function expiryOf(path: string): Promise<Date | null> {
   const result = await execa("openssl", ["x509", "-enddate", "-noout", "-in", path], {
     reject: false,
   });
   if (result.exitCode !== 0) return null;
 
-  const match = /notAfter=(.+)/.exec(String(result.stdout).trim());
+  return parseNotAfter(String(result.stdout));
+}
+
+function parseNotAfter(output: string): Date | null {
+  const match = /notAfter=(.+)/.exec(output.trim());
   if (!match?.[1]) return null;
 
   const parsed = new Date(match[1]);
