@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.10.1...v0.11.0) (2026-09-08)
+
+
+### Features
+
+* wait for the certificates before saying it is running ([d6e2da8](https://github.com/firetower-cloud/firetower-cli/commit/d6e2da8f96c535f6bfeb280728d1b1a5f84b32e7))
+* wait for the certificates before saying it is running ([fb4e556](https://github.com/firetower-cloud/firetower-cli/commit/fb4e55665507936132594bdd3ad6be5526f722b2))
+
 ## [0.10.1](https://github.com/firetower-cloud/firetower-cli/compare/v0.10.0...v0.10.1) (2026-09-08)
 
 
