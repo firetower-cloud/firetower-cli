@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.8.0...v0.9.0) (2026-09-08)
+
+
+### Features
+
+* automatic certificates for a private name, via DNS-01 ([7872aa5](https://github.com/firetower-cloud/firetower-cli/commit/7872aa53f69118d0e1ee577dc4829b19fc78e345))
+* obtain certificates over DNS-01, and add `firetower domain` ([4d7a844](https://github.com/firetower-cloud/firetower-cli/commit/4d7a844dd00ad13a5f37a2b604fc76e4d9177f66))
+
 ## [0.8.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.7.0...v0.8.0) (2026-09-07)
 
 
