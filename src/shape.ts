@@ -321,16 +321,20 @@ async function choose(
   if (only) {
     const others = candidates.length > 1;
 
+    // The reason goes above the prompt, not inside it. Clack wraps a long
+    // message or hint to the left margin, which breaks the alignment of the
+    // whole list and reads as a rendering fault.
+    ui.blank();
+    ui.ok("Mesh network detected", `${only.address} (${only.iface})`);
+    ui.blank();
+
     const answer = await prompts.select({
-      message: `${only.address} (${only.iface}) looks like a Tailscale or mesh VPN address. Is that the one people will reach Firetower on?`,
+      message: `Reach Firetower on ${only.address}?`,
       options: [
         { value: "yes", label: "Yes" },
         {
           value: "no",
-          label: others ? "No — show me the others" : "No",
-          // Said here because with nothing else to offer, "no" is the end of
-          // the run rather than a step back to a list.
-          hint: others ? undefined : "it is the only address this machine has",
+          label: others ? "No — show me the others" : "No — stop here",
         },
       ],
     });
@@ -384,40 +388,42 @@ async function confirmNoMesh(candidates: machine.Candidate[]): Promise<void> {
   const only = candidates[0];
   if (!only) noReachableAddress();
 
+  const addresses = candidates.map((candidate) => candidate.address).join(", ");
+
   ui.blank();
-  ui.warn("nothing here looks like a mesh VPN");
-  ui.blank();
+  ui.warn("No mesh network detected (Tailscale, WireGuard, …)");
   ui.step(
     candidates.length === 1
-      ? `This machine has one address people could reach it on: ${only.address} (${only.iface}).`
-      : `The addresses this machine has — ${candidates.map((c) => c.address).join(", ")} — are all`,
+      ? `${only.address} (${only.iface}) is the only address this machine has.`
+      : `This machine has ${addresses}.`,
   );
-  ui.step(
-    candidates.length === 1
-      ? "Everyone who opens Firetower has to be able to route to it."
-      : "on its own networks. Everyone who opens Firetower has to be able to route to one.",
-  );
-  ui.blank();
-  ui.step("On a cloud VM that usually means nobody can, and the usual answer is");
-  ui.step("Tailscale:");
-  ui.blank();
-  ui.dim("  curl -fsSL https://tailscale.com/install.sh | sh");
-  ui.dim("  sudo tailscale up");
   ui.blank();
 
   const answer = await prompts.select({
-    message: "Can the people who need this reach it at one of those addresses?",
+    message:
+      candidates.length === 1
+        ? `Can your people reach ${only.address}?`
+        : "Can your people reach one of those?",
     options: [
-      { value: "no", label: "No — I will set that up first", hint: "then run this again" },
-      {
-        value: "yes",
-        label: "Yes — they are on this network, or reach it over a VPN",
-        hint: "on-prem, or a VPC wired to your office",
-      },
+      { value: "no", label: "No  (recommended)" },
+      { value: "yes", label: "Yes — they are on this network" },
     ],
     initialValue: "no",
   });
-  if (cancelled(answer) || answer === "no") stop("Nothing was written.");
+  if (cancelled(answer)) stop("Nothing was written.");
+
+  if (answer === "no") {
+    // Printed here rather than above the question. Somebody answering "yes" is
+    // on a network that already works and has no use for install instructions.
+    ui.blank();
+    ui.step("Install Tailscale, then run this again:");
+    ui.blank();
+    ui.dim("  curl -fsSL https://tailscale.com/install.sh | sh");
+    ui.dim("  sudo tailscale up");
+    ui.blank();
+
+    stop("Nothing was written.");
+  }
 }
 
 /**
