@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.3](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.2...v0.11.3) (2026-09-09)
+
+
+### Bug Fixes
+
+* confirm the address a domain will be reached on ([d10302e](https://github.com/firetower-cloud/firetower-cli/commit/d10302e81666c32bc7ae9f9e79a7798c07f7966b))
+* confirm the address a domain will be reached on ([8a4bc12](https://github.com/firetower-cloud/firetower-cli/commit/8a4bc12cea07fda6e8df8675b512ce56b44354e7))
+* obtain the two certificates one at a time ([b0bcbd6](https://github.com/firetower-cloud/firetower-cli/commit/b0bcbd6ed80bdb8cf72b8884445f6840f4e919df))
+
 ## [0.11.2](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.1...v0.11.2) (2026-09-09)
 
 
