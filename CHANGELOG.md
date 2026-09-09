@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.5](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.4...v0.11.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* name the certificate each wait obtained ([42352f9](https://github.com/firetower-cloud/firetower-cli/commit/42352f9a9a29cfe52c852b6f43467e2c8c4f18b0))
+* name the certificate each wait obtained ([cf3073c](https://github.com/firetower-cloud/firetower-cli/commit/cf3073c393b7e344f97e6edf1705819621374dff))
+
 ## [0.11.4](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.3...v0.11.4) (2026-09-09)
 
 
