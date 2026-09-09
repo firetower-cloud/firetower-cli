@@ -13,7 +13,12 @@ import {
   suggest,
 } from "../src/providers.js";
 import { derive, resolveProvider } from "../src/shape.js";
-import { withProviderBlock } from "../src/upstream.js";
+import {
+  servesWildcard,
+  withBareNameOnly,
+  withBothNames,
+  withProviderBlock,
+} from "../src/upstream.js";
 
 /**
  * The typed list, and the failure it exists to prevent.
@@ -300,5 +305,56 @@ describe("propagation settings", () => {
     // line and must not silently drop one another.
     expect(propagationSettings("route53")).toEqual([]);
     expect(withProviderBlock(CADDYFILE, "route53")).toContain("dns {$DNS_PROVIDER} {\n");
+  });
+});
+
+/**
+ * Naming one address at a time, so two certificates cannot race.
+ *
+ * Caddy manages a certificate per name in the site address and asks for all of
+ * them at once. Both prove themselves at the same DNS record, so on a provider
+ * whose API replaces records rather than adding to them, the second write
+ * erases the first — and the retry then loses to a resolver cache holding the
+ * old value for its TTL, ten minutes on GoDaddy.
+ */
+describe("the site address, one name at a time", () => {
+  const caddyfile = readFileSync(join(import.meta.dirname, "..", "fallback", "Caddyfile"), "utf8");
+
+  it("takes the wildcard out for the first phase", () => {
+    const bare = withBareNameOnly(caddyfile);
+
+    expect(bare).toContain("{$DOMAIN} {");
+    expect(bare).not.toContain("*.{$DOMAIN}");
+    expect(servesWildcard(bare)).toBe(false);
+  });
+
+  it("puts it back, byte for byte", () => {
+    // The end state on disk has to be the shipped file. Anything else is a
+    // difference somebody finds later while reading a file they own.
+    expect(withBothNames(withBareNameOnly(caddyfile))).toBe(caddyfile);
+  });
+
+  it("leaves a file that already serves both alone", () => {
+    expect(withBothNames(caddyfile)).toBe(caddyfile);
+    expect(servesWildcard(caddyfile)).toBe(true);
+  });
+
+  it("leaves a Caddyfile somebody has edited alone", () => {
+    // The same rule `withProviderBlock` follows: match the exact shipped text
+    // or do nothing. Reformatting a file the operator owns is worse than the
+    // failure it would prevent.
+    const edited = caddyfile.replace("{$DOMAIN}, *.{$DOMAIN} {", "example.com, *.example.com {");
+
+    expect(withBareNameOnly(edited)).toBe(edited);
+    expect(servesWildcard(edited)).toBe(false);
+  });
+
+  it("survives the provider block being written first", () => {
+    // Both edits touch this file during an install, in that order.
+    const both = withBareNameOnly(withProviderBlock(caddyfile, "godaddy"));
+
+    expect(both).toContain("{$DOMAIN} {");
+    expect(both).toContain("propagation_delay 2m");
+    expect(withBothNames(both)).toBe(withProviderBlock(caddyfile, "godaddy"));
   });
 });

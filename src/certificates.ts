@@ -1,7 +1,11 @@
 import { connect, type PeerCertificate } from "node:tls";
 import { randomBytes } from "node:crypto";
 import * as prompts from "@clack/prompts";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import * as docker from "./docker.js";
 import { MULTI_FIELD } from "./providers.js";
+import { servesWildcard, withBothNames } from "./upstream.js";
 import { suppliesOwnCertificate, type Reach } from "./shape.js";
 import { ui } from "./ui.js";
 
@@ -137,9 +141,18 @@ export interface WaitOptions {
   domain: string;
   /** `--json`, where a spinner would be noise and the wait is unwanted. */
   quiet?: boolean;
-  /** Overridden by the tests, which have no eight minutes to spare. */
+  /** Overridden by the tests, which have no fifteen minutes to spare. */
   timeoutMs?: number;
   intervalMs?: number;
+  /**
+   * Which of the two to wait for.
+   *
+   * `install` waits for the bare name first, while that is the only one the
+   * Caddyfile names, and for both once the wildcard has been put back. Waiting
+   * for both in the first phase would be waiting for a certificate Caddy has
+   * not been asked to obtain.
+   */
+  want?: "bare" | "both";
 }
 
 /**
@@ -196,10 +209,13 @@ export async function awaitCertificates(options: WaitOptions): Promise<Waited> {
   // for it. The same trick `doctor` uses on the DNS side.
   const probe = `probe-${randomBytes(3).toString("hex")}.${domain}`;
 
-  const targets = [
-    { label: domain, servername: domain },
-    { label: `*.${domain}`, servername: probe },
-  ];
+  const targets =
+    options.want === "bare"
+      ? [{ label: domain, servername: domain }]
+      : [
+          { label: domain, servername: domain },
+          { label: `*.${domain}`, servername: probe },
+        ];
 
   const started = Date.now();
   const done = new Set<string>();
@@ -272,5 +288,90 @@ export function reportMissing(dir: string, missing: string[]): void {
   );
   ui.blank();
   ui.dim(`  firetower --dir ${dir} logs caddy -f`);
+  ui.blank();
+}
+
+/**
+ * Put the wildcard back into the Caddyfile and have Caddy pick it up.
+ *
+ * The second half of the phased install. By here the bare name's certificate
+ * is in `caddy_data`, so the reload asks for the wildcard and nothing else —
+ * one writer at the challenge record, which is the whole point.
+ *
+ * **Validated before it is loaded, and never restarted.** `caddy reload` adapts
+ * and checks the config before swapping, and keeps the running one if anything
+ * is wrong, so the worst it can do is decline. A `restart` has no such
+ * property: it reads the file from disk with nothing to fall back on, and a
+ * file Caddy will not parse is a proxy that does not come up — `dns_ttl 600`
+ * without its unit is enough to do that. So the fallback for a failed reload is
+ * to say so, not to try something less safe.
+ */
+export async function reloadWithWildcard(
+  dir: string,
+  service: string,
+): Promise<{ reloaded: boolean; problem?: string }> {
+  const path = join(dir, "Caddyfile");
+  const current = await readFile(path, "utf8").catch(() => null);
+
+  if (current === null) return { reloaded: false, problem: "no Caddyfile to rewrite" };
+  if (servesWildcard(current)) return { reloaded: true };
+
+  await writeFile(path, withBothNames(current), "utf8");
+
+  const checked = await docker.compose(
+    { dir },
+    "exec",
+    "-T",
+    service,
+    "caddy",
+    "validate",
+    "--config",
+    "/etc/caddy/Caddyfile",
+    "--adapter",
+    "caddyfile",
+  );
+
+  if (checked.exitCode !== 0) {
+    // Put back what was serving. Leaving a file Caddy rejects on disk turns the
+    // next ordinary restart — a reboot, `firetower start` — into an outage.
+    await writeFile(path, current, "utf8");
+
+    return { reloaded: false, problem: lastLine(checked.stderr) };
+  }
+
+  const reloaded = await docker.compose(
+    { dir },
+    "exec",
+    "-T",
+    service,
+    "caddy",
+    "reload",
+    "--config",
+    "/etc/caddy/Caddyfile",
+  );
+
+  // A rejected reload leaves Caddy running what it already had, which is the
+  // bare name — a working dashboard and previews that do not resolve. The file
+  // stays as written, because it is the one that should be there and `doctor`
+  // reads the file rather than the running config.
+  return reloaded.exitCode === 0
+    ? { reloaded: true }
+    : { reloaded: false, problem: lastLine(reloaded.stderr) };
+}
+
+function lastLine(stream: unknown): string {
+  return String(stream ?? "").trim().split("\n").at(-1) ?? "";
+}
+
+/** What to say when the wildcard could not be put back. */
+export function reportNotReloaded(dir: string, problem?: string): void {
+  ui.blank();
+  ui.warn(
+    "the wildcard is not being served yet",
+    problem || "Caddy declined the config; it is still serving the bare name",
+  );
+  ui.step("The dashboard works. Previews will not resolve until this is fixed:");
+  ui.blank();
+  ui.dim(`  firetower --dir ${dir} domain`);
   ui.blank();
 }
