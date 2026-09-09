@@ -149,6 +149,56 @@ export async function deployment(options: FetchOptions = {}): Promise<Deployment
 }
 
 /**
+ * The site address line, in the two shapes it takes during an install.
+ *
+ * `BOTH` is what ships and what ends up on disk. `BARE` exists for about two
+ * minutes in the middle.
+ */
+const BOTH_NAMES = "{$DOMAIN}, *.{$DOMAIN} {";
+const BARE_NAME = "{$DOMAIN} {";
+
+/**
+ * The Caddyfile with the wildcard taken out of the site address.
+ *
+ * Half of the fix for two certificates racing each other. Caddy manages a
+ * certificate per name in the site address and asks for all of them at once;
+ * both prove themselves at the *same* DNS record, `_acme-challenge.<domain>`,
+ * so on a provider whose API replaces the records at a name rather than adding
+ * to them the second write erases the first. One certificate is issued, the
+ * other fails, and the retry then loses to a DNS cache holding the old value
+ * for the length of its TTL — ten minutes on GoDaddy, which is its floor.
+ *
+ * Naming one address means one writer. `install` serves this while the bare
+ * name is obtained, then puts the wildcard back and reloads, at which point the
+ * first certificate is cached and only the second is asked for. Two issuances,
+ * neither concurrent with anything.
+ *
+ * Returns the file unchanged when the line is not there — a Caddyfile somebody
+ * has edited is left alone, exactly as `withProviderBlock` leaves it.
+ */
+export function withBareNameOnly(caddyfile: string): string {
+  return caddyfile.replace(BOTH_NAMES, BARE_NAME);
+}
+
+/** Undoes it, restoring the shipped file byte for byte. */
+export function withBothNames(caddyfile: string): string {
+  if (caddyfile.includes(BOTH_NAMES)) return caddyfile;
+
+  return caddyfile.replace(BARE_NAME, BOTH_NAMES);
+}
+
+/**
+ * Whether this Caddyfile serves the wildcard.
+ *
+ * False for one left in the intermediate shape by an install that stopped
+ * between the two phases — a deployment whose dashboard works and whose
+ * previews do not resolve. `doctor` asks this.
+ */
+export function servesWildcard(caddyfile: string): boolean {
+  return caddyfile.includes(BOTH_NAMES);
+}
+
+/**
  * The Caddyfile with the provider's own `dns` shape in it.
  *
  * The shipped file carries the one-line form, which is right for the providers

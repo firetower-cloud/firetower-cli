@@ -28,7 +28,9 @@ import {
 } from "../shape.js";
 import {
   awaitCertificates,
+  reloadWithWildcard,
   reportMissing,
+  reportNotReloaded,
   willObtainCertificate,
   type Waited,
 } from "../certificates.js";
@@ -194,7 +196,7 @@ export async function install(options: InstallOptions): Promise<void> {
   // Between "the containers are healthy" and "somebody can open this" there is
   // a gap, and on some providers it is minutes long. Finishing inside it prints
   // a URL that answers a browser with ERR_SSL_PROTOCOL_ERROR.
-  const waited = await waitForCertificates(reach, ports);
+  const waited = await waitForCertificates(directory, files.compose, reach, ports);
 
   finish(values, admin, reach, ports);
 
@@ -372,12 +374,25 @@ async function write(
   // needs more than a token, or the bring-your-own `tls` line — as a file
   // nothing rewrites afterwards.
   const caddyPath = join(directory, "Caddyfile");
-  const caddyfile = upstream.withProviderBlock(
+  const withProvider = upstream.withProviderBlock(
     files.caddyfile,
     reach.kind === "domain" ? reach.dnsProvider : "",
   );
+
+  // The bare name only, for now, where a certificate is going to be obtained.
+  // Caddy asks for every name in the site address at once and both prove
+  // themselves at the same DNS record, so naming both here is what makes two
+  // writers of one record. The wildcard goes back in once the first
+  // certificate exists — see `reloadWithWildcard`.
+  const caddyfile = willObtainCertificate(reach)
+    ? upstream.withBareNameOnly(withProvider)
+    : withProvider;
+
   await writeFile(caddyPath, caddyfile);
-  ui.ok(caddyPath, caddyfile === files.caddyfile ? undefined : "with the provider block to fill in");
+  ui.ok(
+    caddyPath,
+    withProvider === files.caddyfile ? undefined : "with the provider block to fill in",
+  );
 
   // The compose file's `caddy` service names this as its `dockerfile`, so it
   // has to be here even in the shapes that never build it: Compose reads the
@@ -484,16 +499,38 @@ async function pull(directory: string): Promise<void> {
  * bind is `HTTPS_BIND`, because that is the only address Caddy answers on and
  * loopback is not it.
  */
-async function waitForCertificates(reach: Reach, ports: Ports): Promise<Waited | null> {
+async function waitForCertificates(
+  directory: string,
+  compose: string,
+  reach: Reach,
+  ports: Ports,
+): Promise<Waited | null> {
   if (!willObtainCertificate(reach) || reach.kind !== "domain") return null;
+
+  const where = { host: reach.address, port: ports.https, domain: reach.domain };
 
   ui.blank();
 
-  return awaitCertificates({
-    host: reach.address,
-    port: ports.https,
-    domain: reach.domain,
-  });
+  // One at a time, and this is the fix rather than an optimisation. Asked for
+  // together, the two certificates write to the same challenge record within
+  // half a second of each other; a provider that replaces records rather than
+  // adding to them loses one of them, and the retry then loses again to a DNS
+  // cache holding the old value for its TTL.
+  const bare = await awaitCertificates({ ...where, want: "bare" });
+  if (!bare.ready) return bare;
+
+  // Read from the compose file rather than assumed. A release that renamed the
+  // proxy service would otherwise leave this exec'ing into nothing.
+  const proxy = services.resolve(compose).proxy;
+  if (!proxy) return bare;
+
+  const reload = await reloadWithWildcard(directory, proxy);
+  if (!reload.reloaded) {
+    reportNotReloaded(directory, reload.problem);
+    return { ready: false, missing: [`*.${reach.domain}`] };
+  }
+
+  return awaitCertificates(where);
 }
 
 /**

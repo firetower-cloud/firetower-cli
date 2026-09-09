@@ -148,6 +148,45 @@ describe("waiting for certificates", () => {
   });
 });
 
+describe("waiting for one name at a time", () => {
+  it("is satisfied by the bare name alone in the first phase", async () => {
+    // Phase one names only the bare address in the Caddyfile, so the wildcard
+    // is not being obtained yet. Waiting for it here would be waiting for
+    // something nobody has asked Caddy for.
+    const { key, cert, cleanup } = selfSigned("example.test", ["example.test"]);
+    const port = await serve(key, cert);
+
+    const waited = await awaitCertificates({
+      host: "127.0.0.1",
+      port,
+      domain: "example.test",
+      want: "bare",
+      ...fast,
+    });
+
+    expect(waited).toEqual({ ready: true, missing: [] });
+    cleanup();
+  });
+
+  it("still refuses the placeholder in that phase", async () => {
+    const { key, cert, cleanup } = selfSigned("Caddy Local Authority - ECC Intermediate", [
+      "example.test",
+    ]);
+    const port = await serve(key, cert);
+
+    const waited = await awaitCertificates({
+      host: "127.0.0.1",
+      port,
+      domain: "example.test",
+      want: "bare",
+      ...fast,
+    });
+
+    expect(waited).toEqual({ ready: false, missing: ["example.test"] });
+    cleanup();
+  });
+});
+
 describe("when there is nothing to wait for", () => {
   const domain = (over: Partial<Extract<Reach, { kind: "domain" }>> = {}): Reach => ({
     kind: "domain",
