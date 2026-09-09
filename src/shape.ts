@@ -283,6 +283,68 @@ export async function askAddress(): Promise<string> {
 
   if (candidates.length === 0) noReachableAddress();
 
+  const mesh = candidates.filter((candidate) => candidate.kind === "mesh");
+
+  // Asked *before* the list, and this is the gap it closes. A cloud VM with no
+  // tailnet has exactly one address — the provider's private one — so the list
+  // is not empty and the operator sails through it, picks the only entry, and
+  // configures a name that resolves to somewhere their laptop cannot route to.
+  // The failure arrives much later, as a browser that hangs.
+  if (mesh.length === 0) await confirmNoMesh(candidates);
+
+  const chosen = await choose(candidates, mesh);
+
+  describeAddress(chosen);
+
+  return chosen.address;
+}
+
+/**
+ * Which address, by the shortest honest route to an answer.
+ *
+ * One mesh address is offered by name and confirmed rather than pre-selected.
+ * A pre-selected answer is taken by anybody pressing Enter, and `tailscale0`
+ * being the *right* address is still a guess — a machine can be on a tailnet
+ * and be meant to serve its LAN. Naming it and taking a yes costs one keystroke
+ * and removes the class of "it chose something and I did not notice".
+ *
+ * Two mesh addresses have nothing to confirm, because there is a real choice.
+ * One candidate in total has nothing to ask, because a list of one is a
+ * question with one answer — and it has just been named by `confirmNoMesh`.
+ */
+async function choose(
+  candidates: machine.Candidate[],
+  mesh: machine.Candidate[],
+): Promise<machine.Candidate> {
+  const only = mesh.length === 1 ? mesh[0] : undefined;
+
+  if (only) {
+    const others = candidates.length > 1;
+
+    const answer = await prompts.select({
+      message: `${only.address} (${only.iface}) looks like a Tailscale or mesh VPN address. Is that the one people will reach Firetower on?`,
+      options: [
+        { value: "yes", label: "Yes" },
+        {
+          value: "no",
+          label: others ? "No — show me the others" : "No",
+          // Said here because with nothing else to offer, "no" is the end of
+          // the run rather than a step back to a list.
+          hint: others ? undefined : "it is the only address this machine has",
+        },
+      ],
+    });
+    if (cancelled(answer)) stop("Nothing was written.");
+    if (answer === "yes") return only;
+    if (!others) stop("Nothing was written.", "there is no other address to serve on");
+  }
+
+  if (candidates.length === 1 && candidates[0]) return candidates[0];
+
+  return pickAddress(candidates);
+}
+
+async function pickAddress(candidates: machine.Candidate[]): Promise<machine.Candidate> {
   const choice = await prompts.select({
     message: "Which address will people reach this on?",
     options: candidates.map((candidate) => ({
@@ -299,16 +361,94 @@ export async function askAddress(): Promise<string> {
   });
   if (cancelled(choice)) stop("Nothing was written.");
 
+  const chosen = candidates.find((candidate) => candidate.address === choice);
+  if (!chosen) stop("Nothing was written.");
+
+  return chosen;
+}
+
+/**
+ * Nothing here looks like a mesh VPN, so say so before anything is chosen.
+ *
+ * The two cases are indistinguishable from this machine and opposite in
+ * consequence: an on-prem box, or a VPC wired to the office, is on a network
+ * its people are already on and `10.0.0.5` is the right answer. A cloud VM
+ * whose VPC nobody is peered into has the same interface and the same kind of
+ * address, and nobody can reach it.
+ *
+ * Only the operator knows which. So ask them, with the stakes stated and the
+ * cautious answer first — the cost of "no" is running one more command, and the
+ * cost of a wrong "yes" is a deployment that looks finished and answers nobody.
+ */
+async function confirmNoMesh(candidates: machine.Candidate[]): Promise<void> {
+  const only = candidates[0];
+  if (!only) noReachableAddress();
+
   ui.blank();
-  ui.step("Your domain will point at this address, and Firetower answers here");
-  ui.step("and nowhere else.");
+  ui.warn("nothing here looks like a mesh VPN");
   ui.blank();
-  ui.step("Everyone who needs access has to be on the same tailnet — Tailscale");
-  ui.step("installed on their laptop and added to your network. Without it the");
-  ui.step("domain resolves and nothing answers.");
+  ui.step(
+    candidates.length === 1
+      ? `This machine has one address people could reach it on: ${only.address} (${only.iface}).`
+      : `The addresses this machine has — ${candidates.map((c) => c.address).join(", ")} — are all`,
+  );
+  ui.step(
+    candidates.length === 1
+      ? "Everyone who opens Firetower has to be able to route to it."
+      : "on its own networks. Everyone who opens Firetower has to be able to route to one.",
+  );
+  ui.blank();
+  ui.step("On a cloud VM that usually means nobody can, and the usual answer is");
+  ui.step("Tailscale:");
+  ui.blank();
+  ui.dim("  curl -fsSL https://tailscale.com/install.sh | sh");
+  ui.dim("  sudo tailscale up");
   ui.blank();
 
-  return String(choice);
+  const answer = await prompts.select({
+    message: "Can the people who need this reach it at one of those addresses?",
+    options: [
+      { value: "no", label: "No — I will set that up first", hint: "then run this again" },
+      {
+        value: "yes",
+        label: "Yes — they are on this network, or reach it over a VPN",
+        hint: "on-prem, or a VPC wired to your office",
+      },
+    ],
+    initialValue: "no",
+  });
+  if (cancelled(answer) || answer === "no") stop("Nothing was written.");
+}
+
+/**
+ * What the chosen address means, which is not the same sentence for each kind.
+ *
+ * The tailnet paragraph used to be printed for every answer, including on a
+ * machine with no tailnet — advice that was not merely unhelpful but described
+ * a setup the operator did not have.
+ */
+function describeAddress(chosen: machine.Candidate): void {
+  ui.blank();
+  ui.step(`Your domain will point at ${chosen.address}, and Firetower answers there`);
+  ui.step("and nowhere else.");
+  ui.blank();
+
+  if (chosen.kind === "mesh") {
+    ui.step("Everyone who needs access has to be on the same tailnet — Tailscale");
+    ui.step("installed on their laptop and added to your network. Without it the");
+    ui.step("domain resolves and nothing answers.");
+  } else if (chosen.kind === "public") {
+    ui.warn(
+      "that address is reachable from the internet",
+      "the control plane holds every git token, every agent credential and the root key — the login page would be the only thing in front of them",
+    );
+  } else {
+    ui.step("Everyone who needs access has to be able to reach that address — on");
+    ui.step("this network, or over your VPN. Without it the domain resolves and");
+    ui.step("nothing answers.");
+  }
+
+  ui.blank();
 }
 
 /**
@@ -350,7 +490,21 @@ function bindFromFlags(options: ReachOptions): string {
 
   const candidates = machine.candidateAddresses();
   if (candidates.length === 0) noReachableAddress();
-  if (candidates.length === 1 && candidates[0]) return candidates[0].address;
+
+  const mesh = candidates.filter((candidate) => candidate.kind === "mesh");
+
+  // A single mesh address is the one case with nothing to decide. Everything
+  // else is a decision, and unattended is exactly where a wrong one goes
+  // unnoticed: the install finishes, the certificate is issued, and the failure
+  // arrives days later as a browser that hangs.
+  if (mesh.length === 1 && mesh[0]) return mesh[0].address;
+
+  if (mesh.length === 0) {
+    return stop(
+      `nothing on this machine looks like a mesh VPN — only ${candidates.map((c) => c.address).join(", ")}`,
+      "if your people can reach one of those, name it with --https-bind. If they cannot, install Tailscale here first.",
+    );
+  }
 
   return stop(
     `this machine has several addresses — ${candidates.map((c) => c.address).join(", ")}`,
