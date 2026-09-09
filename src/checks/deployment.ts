@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execa } from "execa";
 import * as docker from "../docker.js";
@@ -427,11 +428,50 @@ function parseNotAfter(output: string): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+/**
+ * Whether the Caddyfile still names the wildcard.
+ *
+ * `install` serves the bare name alone while the first certificate is
+ * obtained, then puts the wildcard back and reloads — two issuances, so that
+ * they cannot both write the same DNS challenge record at once. An install
+ * interrupted between the two leaves the file in the intermediate shape, and
+ * the symptom is specific and confusing: the dashboard works perfectly, and
+ * every preview fails to resolve.
+ *
+ * Cheap to detect and cheap to fix, so it is worth a check rather than a
+ * support conversation.
+ */
+export const wildcardServed: Check = {
+  name: "previews",
+  preflight: false,
+  deployment: true,
+  async run({ dir }) {
+    if (!dir) return fail("previews", "no deployment found");
+
+    const deployment = await openDeployment(dir);
+    const domain = (deployment.env.DOMAIN ?? "").trim();
+
+    if (!domain) return ok("previews", "served on *.localhost, over the tunnel");
+
+    const caddyfile = await readFile(join(dir, "Caddyfile"), "utf8").catch(() => null);
+    if (caddyfile === null) return ok("previews", "no Caddyfile to read");
+
+    if (upstream.servesWildcard(caddyfile)) return ok("previews", `served on *.${domain}`);
+
+    return fail(
+      "previews",
+      `the Caddyfile serves ${domain} but not *.${domain}`,
+      "an install that stopped halfway leaves this — the dashboard works and previews do not resolve. `firetower domain` puts it back.",
+    );
+  },
+};
+
 export const deploymentChecks: Check[] = [
   containers,
   environment,
   exposure,
   certificateExpiry,
+  wildcardServed,
   trustedProxy,
   upToDate,
   workerDrift,

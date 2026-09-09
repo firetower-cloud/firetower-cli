@@ -25,7 +25,14 @@ import {
   type Reach,
   type ReachOptions,
 } from "../shape.js";
-import { awaitCertificates, reportMissing, willObtainCertificate } from "../certificates.js";
+import {
+  awaitCertificates,
+  reloadWithWildcard,
+  reportMissing,
+  reportNotReloaded,
+  willObtainCertificate,
+  type Waited,
+} from "../certificates.js";
 import { ui, pc } from "../ui.js";
 
 /**
@@ -144,7 +151,7 @@ export async function domain(options: DomainOptions): Promise<void> {
   ui.blank();
   ui.step("Writing");
 
-  await ensureProxyFiles(dir, deployment.compose, reach);
+  const freshCaddyfile = await ensureProxyFiles(dir, deployment.compose, reach);
 
   if (shape?.next) {
     await writeFile(shape.path, shape.next, "utf8");
@@ -161,10 +168,7 @@ export async function domain(options: DomainOptions): Promise<void> {
   // The path this matters most on. `firetower domain` is what somebody runs to
   // put a name on a working deployment, and it used to hand back a URL that
   // failed for the next couple of minutes.
-  const waited =
-    willObtainCertificate(reach) && reach.kind === "domain"
-      ? await awaitCertificates({ host: reach.address, port: ports.https, domain: reach.domain })
-      : null;
+  const waited = await waitForCertificates(dir, deployment.compose, reach, ports, freshCaddyfile);
 
   finish(dir, reach, ports, next);
 
@@ -261,8 +265,8 @@ function refuseIfItCannotIssue(reach: Reach, compose: string): void {
  * file and the Caddyfile — which is every deployment that predates the build,
  * and exactly the population this command exists to serve.
  */
-async function ensureProxyFiles(dir: string, compose: string, reach: Reach): Promise<void> {
-  if (reach.kind !== "domain") return;
+async function ensureProxyFiles(dir: string, compose: string, reach: Reach): Promise<boolean> {
+  if (reach.kind !== "domain") return false;
 
   // `certs/` matters only on the bring-your-own path, but making it is free and
   // a bind mount whose source does not exist is created by the daemon, owned by
@@ -277,16 +281,33 @@ async function ensureProxyFiles(dir: string, compose: string, reach: Reach): Pro
     if (!(await exists(join(dir, file)))) missing.push(file);
   }
 
-  if (missing.length > 0) {
-    const files = await upstream.deployment();
+  if (missing.length === 0) return false;
 
-    for (const file of missing) {
-      const body = file === "Caddyfile" ? files.caddyfile : files.dockerfile;
-      await writeFile(join(dir, file), body, "utf8");
-      ui.ok(join(dir, file), "written — this deployment had never had a proxy");
-    }
+  const files = await upstream.deployment();
+
+  for (const file of missing) {
+    const body =
+      file === "Caddyfile"
+        ? // The bare name only where a certificate is about to be obtained.
+          // `waitForCertificates` puts the wildcard back once the first one
+          // exists, so that the two are never asked for at once.
+          willObtainCertificate(reach)
+          ? upstream.withBareNameOnly(files.caddyfile)
+          : files.caddyfile
+        : files.dockerfile;
+
+    await writeFile(join(dir, file), body, "utf8");
+    ui.ok(join(dir, file), "written — this deployment had never had a proxy");
   }
 
+  // Whether the Caddyfile is new, which is the only case where the two
+  // certificates are both about to be obtained and can therefore race.
+  //
+  // A deployment that already had one has at least one certificate in
+  // `caddy_data`, so there is nothing to serialise — and taking the wildcard
+  // out of a live config to serialise it anyway would stop previews resolving
+  // for two minutes to solve a problem that is not there.
+  return missing.includes("Caddyfile");
 }
 
 /**
@@ -374,6 +395,40 @@ function report(
   }
 
   ui.blank();
+}
+
+/**
+ * The same two-phase wait `install` does, and phased on the same condition.
+ *
+ * Only where the Caddyfile was written a moment ago. A deployment that already
+ * had one already has a certificate, so there are not two issuances to keep
+ * apart — and removing the wildcard from a config that is serving it would take
+ * previews down for two minutes for nothing.
+ */
+async function waitForCertificates(
+  dir: string,
+  compose: string,
+  reach: Reach,
+  ports: Parameters<typeof published>[1],
+  phased: boolean,
+): Promise<Waited | null> {
+  if (!willObtainCertificate(reach) || reach.kind !== "domain") return null;
+
+  const where = { host: reach.address, port: ports.https, domain: reach.domain };
+  const proxy = services.resolve(compose).proxy;
+
+  if (!phased || !proxy) return awaitCertificates(where);
+
+  const bare = await awaitCertificates({ ...where, want: "bare" });
+  if (!bare.ready) return bare;
+
+  const reload = await reloadWithWildcard(dir, proxy);
+  if (!reload.reloaded) {
+    reportNotReloaded(dir, reload.problem);
+    return { ready: false, missing: [`*.${reach.domain}`] };
+  }
+
+  return awaitCertificates(where);
 }
 
 /**
