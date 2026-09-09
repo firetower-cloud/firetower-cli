@@ -220,6 +220,16 @@ export async function awaitCertificates(options: WaitOptions): Promise<Waited> {
   const started = Date.now();
   const done = new Set<string>();
 
+  // Which of them this wait is actually for, decided before any of it lands.
+  // The phased install calls this twice, and "Certificates obtained" twice over
+  // reads as the same line printed by mistake — so each says what it got, and
+  // the second does not re-announce the one the first already reported.
+  const wanted: string[] = [];
+  for (const target of targets) {
+    if (await isReady(host, port, target.servername)) done.add(target.label);
+    else wanted.push(target.label);
+  }
+
   // No spinner where it cannot repaint. Clack moves the cursor to redraw its
   // line, which a pipe, a CI log or `--json` turns into one line per tick.
   const animated = !options.quiet && process.stderr.isTTY;
@@ -230,6 +240,15 @@ export async function awaitCertificates(options: WaitOptions): Promise<Waited> {
     ui.step("Waiting for certificates — Let's Encrypt, not us. Up to a few minutes.");
   }
 
+  // The spinner owns the closing line when there is one. Without a TTY there is
+  // no spinner, and the wait used to end in silence — a log that says it
+  // started and never says how it went.
+  const say = (message: string, failed = false) => {
+    if (spinner) spinner.stop(message, failed ? 1 : 0);
+    else if (!options.quiet && failed) ui.warn(message);
+    else if (!options.quiet) ui.ok(message);
+  };
+
   for (;;) {
     for (const target of targets) {
       if (done.has(target.label)) continue;
@@ -238,19 +257,34 @@ export async function awaitCertificates(options: WaitOptions): Promise<Waited> {
 
     const missing = targets.filter((t) => !done.has(t.label)).map((t) => t.label);
     if (missing.length === 0) {
-      spinner?.stop("Certificates obtained");
+      say(obtained(wanted, targets.map((target) => target.label)));
       return { ready: true, missing: [] };
     }
 
     const elapsed = Date.now() - started;
     if (elapsed >= timeout) {
-      spinner?.stop(`No certificate yet for ${missing.join(" and ")}`, 1);
+      say(`No certificate yet for ${missing.join(" and ")}`, true);
       return { ready: false, missing };
     }
 
     spinner?.message(progress(missing, elapsed));
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
+}
+
+/**
+ * What was obtained, named.
+ *
+ * The phased install waits twice, and two lines both reading "Certificates
+ * obtained" look like the same line printed by mistake. Each says which one it
+ * got, and the second does not re-announce what the first already reported —
+ * `wanted` is what was outstanding when that wait began.
+ */
+export function obtained(wanted: string[], all: string[]): string {
+  if (wanted.length === 0) return `Certificate already in place for ${all.join(" and ")}`;
+  if (wanted.length === 1) return `Certificate obtained for ${wanted[0]}`;
+
+  return `Certificates obtained for ${wanted.join(" and ")}`;
 }
 
 /**
