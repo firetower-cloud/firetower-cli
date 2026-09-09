@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.2](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.1...v0.11.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* wait fifteen minutes for a certificate, not eight ([47a9061](https://github.com/firetower-cloud/firetower-cli/commit/47a90616e4df71cc42a2ab9e1c170391e2ba4640))
+* wait fifteen minutes for a certificate, not eight ([6b836db](https://github.com/firetower-cloud/firetower-cli/commit/6b836db6a27f3c43c78ff9ada8408c067ca6e672))
+
 ## [0.11.1](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.0...v0.11.1) (2026-09-08)
 
 
