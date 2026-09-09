@@ -209,6 +209,13 @@ describe("the spinner line", () => {
     expect(progress(["example.test"], 120_000)).toContain("retry");
   });
 
+  it("says leaving is allowed once the wait is long", () => {
+    // Fifteen minutes at a prompt is only tolerable if it is clear nothing is
+    // riding on it. Caddy retries inside its own container either way.
+    expect(progress(["example.test"], 400_000)).toContain("Ctrl-C");
+    expect(progress(["example.test"], 120_000)).not.toContain("Ctrl-C");
+  });
+
   it("reads as minutes once it is minutes", () => {
     expect(progress(["example.test"], 30_000)).toContain("(30s)");
     expect(progress(["example.test"], 125_000)).toContain("(2m5s)");

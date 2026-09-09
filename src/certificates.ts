@@ -143,18 +143,33 @@ export interface WaitOptions {
 }
 
 /**
- * Long enough for the retry, short enough not to strand somebody.
+ * Long enough for the retries, which is longer than it first looks.
  *
- * The worst run measured: the first attempt fails at about 125 seconds, Caddy
- * retries 60 seconds later, and the second lands 125 seconds after that. Five
- * minutes. Eight leaves room for a slower provider without leaving anybody
- * watching a spinner wondering whether it is stuck.
+ * Eight minutes was the first guess and it was short. Each attempt takes about
+ * 125 seconds — `propagation_delay` and then the check — and Caddy backs off
+ * 60s, 120s, 240s between them. So a third attempt does not finish until about
+ * nine minutes in, and a wildcard that needed one was reported missing by a
+ * deployment that went on to obtain it two minutes later.
+ *
+ * Fifteen costs nothing in the ordinary case, because the wait ends the moment
+ * both certificates answer — a Cloudflare install is out in seconds either way.
+ * It is only spent where something is genuinely slow, and there the alternative
+ * was a warning that resolved itself unattended.
  */
-const TIMEOUT_MS = 8 * 60 * 1000;
+const TIMEOUT_MS = 15 * 60 * 1000;
 const INTERVAL_MS = 3000;
 
 /** Where the spinner starts saying *why* rather than just spinning. */
 const EXPLAIN_AFTER_MS = 90 * 1000;
+
+/**
+ * Where it starts saying that leaving is allowed.
+ *
+ * Waiting fifteen minutes at a prompt is only tolerable if it is clear nothing
+ * is riding on it. Caddy is retrying inside its own container and does not care
+ * whether this process is still watching.
+ */
+const RELEASE_AFTER_MS = 5 * 60 * 1000;
 
 export interface Waited {
   /** Both certificates are being served. */
@@ -235,11 +250,15 @@ export function progress(pending: string[], elapsed: number): string {
   const names = pending.join(", ");
 
   // Held back, because most installs never wait long enough to need it and a
-  // sentence about DNS providers on a twelve-second install is noise.
+  // sentence about DNS providers on a twelve-second install is noise. Replaced
+  // rather than added to once it has been said and the wait continues: by then
+  // the useful thing is not the explanation but permission to stop watching.
   const why =
-    elapsed >= EXPLAIN_AFTER_MS
-      ? " — both prove themselves at the same DNS record, so one often needs a retry"
-      : "";
+    elapsed >= RELEASE_AFTER_MS
+      ? " — still retrying. Safe to Ctrl-C; Caddy carries on without you"
+      : elapsed >= EXPLAIN_AFTER_MS
+        ? " — both prove themselves at the same DNS record, so one often needs a retry"
+        : "";
 
   return `${waiting} — ${names}${why}`;
 }
