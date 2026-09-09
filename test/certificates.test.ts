@@ -4,7 +4,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { awaitCertificates, progress, willObtainCertificate } from "../src/certificates.js";
+import {
+  awaitCertificates,
+  obtained,
+  progress,
+  willObtainCertificate,
+} from "../src/certificates.js";
 import type { Reach } from "../src/shape.js";
 
 /**
@@ -258,5 +263,42 @@ describe("the spinner line", () => {
   it("reads as minutes once it is minutes", () => {
     expect(progress(["example.test"], 30_000)).toContain("(30s)");
     expect(progress(["example.test"], 125_000)).toContain("(2m5s)");
+  });
+});
+
+describe("what the wait says it got", () => {
+  /**
+   * The phased install waits twice. Two lines both reading "Certificates
+   * obtained" look like the same line printed by mistake, so each names what it
+   * got — and the second does not re-announce the one the first reported.
+   */
+  it("names the certificate a phase was waiting for", () => {
+    expect(obtained(["ft.westlabs.dev"], ["ft.westlabs.dev"])).toBe(
+      "Certificate obtained for ft.westlabs.dev",
+    );
+  });
+
+  it("names only the one that was outstanding", () => {
+    // Phase two. The bare name was already there and was announced by phase
+    // one; saying it again would read as an issuance that did not happen.
+    expect(obtained(["*.ft.westlabs.dev"], ["ft.westlabs.dev", "*.ft.westlabs.dev"])).toBe(
+      "Certificate obtained for *.ft.westlabs.dev",
+    );
+  });
+
+  it("names both when both were outstanding", () => {
+    const both = ["ft.westlabs.dev", "*.ft.westlabs.dev"];
+
+    expect(obtained(both, both)).toBe(
+      "Certificates obtained for ft.westlabs.dev and *.ft.westlabs.dev",
+    );
+  });
+
+  it("says so when there was nothing to wait for", () => {
+    const both = ["ft.westlabs.dev", "*.ft.westlabs.dev"];
+
+    expect(obtained([], both)).toBe(
+      "Certificate already in place for ft.westlabs.dev and *.ft.westlabs.dev",
+    );
   });
 });
