@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.4](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.3...v0.11.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* keep the address prompts inside the terminal ([48fb4fb](https://github.com/firetower-cloud/firetower-cli/commit/48fb4fb74ac9a6ea6797a93a8cac4a3a018a3a9a))
+* state the address facts instead of explaining them ([f825cce](https://github.com/firetower-cloud/firetower-cli/commit/f825cce3e807dc8e2f85bdf49def85eb0f380241))
+
 ## [0.11.3](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.2...v0.11.3) (2026-09-09)
 
 
