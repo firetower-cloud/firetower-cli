@@ -1,4 +1,3 @@
-import { hostname, userInfo } from "node:os";
 import * as prompts from "@clack/prompts";
 import * as docker from "./docker.js";
 import * as env from "./env.js";
@@ -47,12 +46,26 @@ export type Reach =
       /** A credential for that provider's API. Empty with `OWN_CERTIFICATE`. */
       dnsToken: string;
       /**
-       * The address Caddy listens on, and the address both DNS records point
-       * at. One fact, not two: the name is only useful if it resolves to
-       * somewhere the browsers can reach, and Caddy answering anywhere else is
-       * a door nobody asked for. Written to `HTTPS_BIND`.
+       * The address people reach this on — what both DNS records point at, and
+       * what every screen that names an address prints.
        */
       address: string;
+      /**
+       * The address Caddy listens on. Written to `HTTPS_BIND`.
+       *
+       * The same as `address` whenever this machine holds it, which is every
+       * deployment on a tailnet and every one on its own LAN. It is `0.0.0.0`
+       * on a machine *reached* at an address it does not *have*: Google Cloud,
+       * AWS and Azure each implement an external IP as NAT outside the guest,
+       * so `os.networkInterfaces()` shows only the internal one and there is
+       * nothing else to bind. A floating IP or a load balancer in front has
+       * the same shape.
+       *
+       * They were one field until that case turned up, on the grounds that a
+       * name is only useful if it resolves to where Caddy is listening. That
+       * is still true — it is just not always expressible as one address.
+       */
+      bind: string;
     }
   | { kind: "proxy"; publicUrl: string };
 
@@ -87,8 +100,13 @@ export interface ReachOptions {
   publicUrl?: string;
   dnsProvider?: string;
   dnsToken?: string;
-  /** Which of this machine's addresses Caddy listens on. See `Reach.address`. */
+  /** Which address Caddy listens on. See `Reach.bind`. */
   httpsBind?: string;
+  /**
+   * The address people reach it on, when that is not the address it listens
+   * on. See `Reach.bind` — this is the flag for the machine behind NAT.
+   */
+  advertise?: string;
   yes?: boolean;
 }
 
@@ -124,24 +142,27 @@ export function resolveProvider(raw: string): { provider: string } | { problem: 
 /**
  * How this deployment is reached.
  *
- * Three answers rather than yes-or-no, because "yes, a domain" used to mean two
- * things that need different deployments. Somebody who already runs nginx on 80
- * has a domain *and* cannot give Caddy the ports a certificate needs, and until
- * there was a third answer this CLI had nothing to offer them.
+ * Two answers, and the difference between them is only who chooses the
+ * address. **Mesh** detects it; **advanced** takes what is typed and checks
+ * nothing.
  *
- * None of the three publishes the control plane to the internet, and that is
- * not an omission. It holds every git token, every agent credential and the
- * root key; whoever reaches it can erase the codebase of the company that
- * installed it.
+ * Checking nothing is the deliberate part. It used to classify the answer as
+ * mesh, private or public and warn accordingly, which cannot be made correct:
+ * on a Google Cloud VM `10.128.0.2` is an RFC1918 address that the whole
+ * internet reaches through an external IP the guest never sees. A "private"
+ * address that is publicly reachable. Since the two cannot be told apart from
+ * here, advanced states the consequence once, before the prompt, and believes
+ * the answer.
  *
- * `domain` used to mean "let Caddy get a certificate from Let's Encrypt", which
- * required exactly that exposure — and issued one certificate per preview
- * hostname, publishing each to Certificate Transparency logs even though a
- * preview hostname *is* the credential for that preview. It now means a
- * certificate obtained over **DNS-01**: the challenge is answered by writing a
- * TXT record through the provider's API, so every connection is outbound, the
- * name never has to be reachable, and one wildcard covers every preview without
- * naming any of them.
+ * Loopback is not one of the answers any more. It was the default for a year,
+ * and `infer` still recognises it so that a deployment which has one keeps
+ * upgrading — the refusal is about *choosing* it, exactly as with `proxy`.
+ *
+ * Both answers obtain the certificate over **DNS-01**: the challenge is
+ * answered by writing a TXT record through the provider's API, so every
+ * connection is outbound, the name never has to be reachable, and one wildcard
+ * covers every preview hostname without naming any of them in a public
+ * Certificate Transparency log.
  */
 export async function askReach(options: ReachOptions): Promise<Reach> {
   if (options.domain) {
@@ -162,77 +183,77 @@ export async function askReach(options: ReachOptions): Promise<Reach> {
       );
     }
 
+    const { address, bind } = addressFromFlags(options);
+
     return {
       kind: "domain",
       domain: options.domain.trim(),
       dnsProvider: resolved.provider,
       dnsToken: MULTI_FIELD.has(resolved.provider) ? "" : (options.dnsToken ?? ""),
-      address: bindFromFlags(options),
+      address,
+      bind,
     };
   }
   if (options.publicUrl) refuseProxy();
 
-  // `--domain ""` is how a script says "no domain", and has always meant that.
-  if (options.domain === "" || options.yes) return { kind: "local" };
+  // Both used to mean the loopback shape, which no longer installs. Said as a
+  // refusal naming the flag rather than as a menu nobody is there to read: a
+  // script written against the old meaning must fail loudly, not quietly
+  // install something else.
+  if (options.domain === "" || options.yes) {
+    stop(
+      "a domain is required",
+      "pass --domain, --dns-provider and --dns-token. Installing on loopback is no longer a shape — see the README.",
+    );
+  }
 
   const choice = await prompts.select({
     message: "How will people reach this Firetower?",
     options: [
       {
-        value: "local",
-        label: "Only from this machine",
-        // The mechanism goes in the hint rather than the label because it is
-        // not the same mechanism in both cases. Installed on the machine you
-        // are sitting at, there is no tunnel and never was; installed on a
-        // server, there is. The label states the property, which is true of
-        // both: nothing is published to the network.
-        hint: "simplest to start — directly, or with `firetower tunnel` from your laptop",
+        value: "mesh",
+        label: "Tailscale or another mesh VPN",
+        hint: "recommended — free, and takes 5 min",
       },
       {
-        value: "domain",
-        label: "Your own domain, over Tailscale or another mesh VPN",
-        hint: "more suited for teams",
-      },
-      {
-        value: "proxy",
-        label: "Behind a reverse proxy I already run",
-        hint: "not supported yet",
+        value: "custom",
+        label: "Advanced (type my own IP)",
+        hint: "public, your LAN, or a VPN you run",
       },
     ],
   });
   if (cancelled(choice)) stop("Nothing was written.");
 
-  if (choice === "local") return { kind: "local" };
+  // Asked before the domain, and that order is the point. Somebody with no
+  // reachable address has nothing to gain from typing a name and choosing a
+  // certificate provider first, and this is the question that decides whether
+  // the rest of it can work at all.
+  const { address, bind } = choice === "mesh" ? await askMeshAddress() : await askCustomAddress();
 
-  if (choice === "domain") {
-    // Asked before the domain, and that order is the point. Somebody with no
-    // reachable address has nothing to gain from typing a name and choosing a
-    // certificate provider first, and this is the question that decides
-    // whether the rest of it can work at all.
-    const address = await askAddress();
+  const answer = await prompts.text({
+    message: "Domain",
+    placeholder: "firetower.example.com",
+    validate: (value) => (value.trim() ? undefined : "A domain — previews need one too"),
+  });
+  if (cancelled(answer)) stop("Nothing was written.");
 
-    const answer = await prompts.text({
-      message: "Domain",
-      placeholder: "firetower.example.com",
-      validate: (value) =>
-        value.trim() ? undefined : "A domain, or go back and choose another answer",
-    });
-    if (cancelled(answer)) stop("Nothing was written.");
+  const domain = String(answer).trim();
 
-    const domain = String(answer).trim();
+  // The provider comes before the records, because the records screen names it
+  // — "create these in GoDaddy" — and because the condition that actually
+  // gates the certificate is about the provider, so it cannot be stated before
+  // there is one.
+  const { dnsProvider, dnsToken } = await askCertificate(domain);
 
-    // The provider comes before the records, because the records screen names
-    // it — "create these in GoDaddy" — and because the condition that actually
-    // gates the certificate is about the provider, so it cannot be stated
-    // before there is one.
-    const { dnsProvider, dnsToken } = await askCertificate(domain);
+  await showRecords(domain, address, dnsProvider);
 
-    await showRecords(domain, address, dnsProvider);
+  return { kind: "domain", domain, dnsProvider, dnsToken, address, bind };
+}
 
-    return { kind: "domain", domain, dnsProvider, dnsToken, address };
-  }
-
-  return refuseProxy();
+/** An address and the interface it is served on. See `Reach.bind`. */
+export interface Addressing {
+  address: string;
+  bind: string;
 }
 
 /**
@@ -265,255 +286,237 @@ function refuseProxy(): never {
 }
 
 /**
- * Which of this machine's addresses people will reach it on.
+ * The mesh address, detected.
  *
- * The question the `domain` shape has always turned on and never asked. It used
- * to take the first entry off `networkInterfaces()` to print in the DNS records
- * and write the answer nowhere — so on a cloud VM with a tailnet it suggested
- * the provider's VPC address, which no laptop outside that VPC can route to,
- * and Caddy bound `0.0.0.0` regardless.
+ * A tailnet address is always configured on an interface of this machine, so
+ * there is nothing to type and `bind` is always the address itself. That is
+ * the whole reason this path is the recommended one: it is the only shape
+ * where the CLI can be sure of the answer.
  *
- * Always asked, never inferred, even when there is an obvious answer.
- * Recognising a mesh interface is a heuristic — a WireGuard link somebody named
- * `corp0` is a good answer that no pattern will spot — so detection orders the
- * list and pre-selects the top of it, and being wrong costs an arrow key.
+ * Detection is still a heuristic — a WireGuard link somebody named `corp0` is
+ * a good answer that no pattern will spot — so a single hit is named and
+ * confirmed rather than pre-selected, and anybody whose mesh is not recognised
+ * has the advanced path.
  */
-export async function askAddress(): Promise<string> {
-  const candidates = machine.candidateAddresses();
+export async function askMeshAddress(): Promise<Addressing> {
+  const mesh = machine.candidateAddresses().filter((candidate) => candidate.kind === "mesh");
 
-  if (candidates.length === 0) noReachableAddress();
+  if (mesh.length === 0) noMeshFound();
 
-  const mesh = candidates.filter((candidate) => candidate.kind === "mesh");
-
-  // Asked *before* the list, and this is the gap it closes. A cloud VM with no
-  // tailnet has exactly one address — the provider's private one — so the list
-  // is not empty and the operator sails through it, picks the only entry, and
-  // configures a name that resolves to somewhere their laptop cannot route to.
-  // The failure arrives much later, as a browser that hangs.
-  if (mesh.length === 0) await confirmNoMesh(candidates);
-
-  const chosen = await choose(candidates, mesh);
-
-  describeAddress(chosen);
-
-  return chosen.address;
-}
-
-/**
- * Which address, by the shortest honest route to an answer.
- *
- * One mesh address is offered by name and confirmed rather than pre-selected.
- * A pre-selected answer is taken by anybody pressing Enter, and `tailscale0`
- * being the *right* address is still a guess — a machine can be on a tailnet
- * and be meant to serve its LAN. Naming it and taking a yes costs one keystroke
- * and removes the class of "it chose something and I did not notice".
- *
- * Two mesh addresses have nothing to confirm, because there is a real choice.
- * One candidate in total has nothing to ask, because a list of one is a
- * question with one answer — and it has just been named by `confirmNoMesh`.
- */
-async function choose(
-  candidates: machine.Candidate[],
-  mesh: machine.Candidate[],
-): Promise<machine.Candidate> {
-  const only = mesh.length === 1 ? mesh[0] : undefined;
-
-  if (only) {
-    const others = candidates.length > 1;
-
-    // The reason goes above the prompt, not inside it. Clack wraps a long
-    // message or hint to the left margin, which breaks the alignment of the
-    // whole list and reads as a rendering fault.
-    ui.blank();
-    ui.ok("Mesh network detected", `${only.address} (${only.iface})`);
-    ui.blank();
-
-    const answer = await prompts.select({
-      message: `Reach Firetower on ${only.address}?`,
-      options: [
-        { value: "yes", label: "Yes" },
-        {
-          value: "no",
-          label: others ? "No — show me the others" : "No — stop here",
-        },
-      ],
-    });
-    if (cancelled(answer)) stop("Nothing was written.");
-    if (answer === "yes") return only;
-    if (!others) stop("Nothing was written.", "there is no other address to serve on");
-  }
-
-  if (candidates.length === 1 && candidates[0]) return candidates[0];
-
-  return pickAddress(candidates);
-}
-
-async function pickAddress(candidates: machine.Candidate[]): Promise<machine.Candidate> {
-  const choice = await prompts.select({
-    message: "Which address will people reach this on?",
-    options: candidates.map((candidate) => ({
-      value: candidate.address,
-      label: `${candidate.address}   ${candidate.iface}`,
-      hint:
-        candidate.kind === "mesh"
-          ? "looks like a mesh VPN"
-          : candidate.kind === "public"
-            ? "public, reachable from the internet"
-            : undefined,
-    })),
-    initialValue: candidates[0]?.address,
-  });
-  if (cancelled(choice)) stop("Nothing was written.");
-
-  const chosen = candidates.find((candidate) => candidate.address === choice);
-  if (!chosen) stop("Nothing was written.");
-
-  return chosen;
-}
-
-/**
- * Nothing here looks like a mesh VPN, so say so before anything is chosen.
- *
- * The two cases are indistinguishable from this machine and opposite in
- * consequence: an on-prem box, or a VPC wired to the office, is on a network
- * its people are already on and `10.0.0.5` is the right answer. A cloud VM
- * whose VPC nobody is peered into has the same interface and the same kind of
- * address, and nobody can reach it.
- *
- * Only the operator knows which. So ask them, with the stakes stated and the
- * cautious answer first — the cost of "no" is running one more command, and the
- * cost of a wrong "yes" is a deployment that looks finished and answers nobody.
- */
-async function confirmNoMesh(candidates: machine.Candidate[]): Promise<void> {
-  const only = candidates[0];
-  if (!only) noReachableAddress();
-
-  const addresses = candidates.map((candidate) => candidate.address).join(", ");
+  const chosen = mesh.length === 1 && mesh[0] ? await confirmMesh(mesh[0]) : await pickMesh(mesh);
 
   ui.blank();
-  ui.warn("No mesh network detected (Tailscale, WireGuard, …)");
-  ui.step(
-    candidates.length === 1
-      ? `${only.address} (${only.iface}) is the only address this machine has.`
-      : `This machine has ${addresses}.`,
-  );
+  ui.step(`Your domain will point at ${chosen}, and Firetower answers there`);
+  ui.step("and nowhere else.");
+  ui.blank();
+  ui.step("Everyone who needs access has to be on the same tailnet — Tailscale");
+  ui.step("installed on their laptop and added to your network. Without it the");
+  ui.step("domain resolves and nothing answers.");
+  ui.blank();
+
+  return { address: chosen, bind: chosen };
+}
+
+/**
+ * One mesh address, named and confirmed.
+ *
+ * A pre-selected answer is taken by anybody pressing Enter, and `tailscale0`
+ * being the *right* address is still a guess — a machine can be on a tailnet
+ * and be meant to serve its LAN. Naming it and taking a yes costs one
+ * keystroke and removes the class of "it chose something and I did not
+ * notice".
+ */
+async function confirmMesh(only: machine.Candidate): Promise<string> {
+  // The reason goes above the prompt, not inside it. Clack wraps a long
+  // message or hint to the left margin, which breaks the alignment of the
+  // whole list and reads as a rendering fault.
+  ui.blank();
+  ui.ok("Mesh network detected", `${only.address} (${only.iface})`);
   ui.blank();
 
   const answer = await prompts.select({
-    message:
-      candidates.length === 1
-        ? `Can your people reach ${only.address}?`
-        : "Can your people reach one of those?",
+    message: `Reach Firetower on ${only.address}?`,
     options: [
-      { value: "no", label: "No  (recommended)" },
-      { value: "yes", label: "Yes — they are on this network" },
+      { value: "yes", label: "Yes" },
+      { value: "no", label: "No — stop here" },
     ],
-    initialValue: "no",
   });
   if (cancelled(answer)) stop("Nothing was written.");
-
   if (answer === "no") {
-    // Printed here rather than above the question. Somebody answering "yes" is
-    // on a network that already works and has no use for install instructions.
-    ui.blank();
-    ui.step("Install Tailscale, then run this again:");
-    ui.blank();
-    ui.dim("  curl -fsSL https://tailscale.com/install.sh | sh");
-    ui.dim("  sudo tailscale up");
-    ui.blank();
-
-    stop("Nothing was written.");
+    stop("Nothing was written.", "run `firetower install` again and choose Advanced to type one");
   }
+
+  return only.address;
+}
+
+/** Several mesh addresses, which is a real choice and needs no confirmation. */
+async function pickMesh(mesh: machine.Candidate[]): Promise<string> {
+  const choice = await prompts.select({
+    message: "Which address will people reach this on?",
+    options: mesh.map((candidate) => ({
+      value: candidate.address,
+      label: `${candidate.address}   ${candidate.iface}`,
+      hint: "looks like a mesh VPN",
+    })),
+    initialValue: mesh[0]?.address,
+  });
+  if (cancelled(choice)) stop("Nothing was written.");
+
+  return String(choice);
 }
 
 /**
- * What the chosen address means, which is not the same sentence for each kind.
+ * The address, typed, with nothing checked.
  *
- * The tailnet paragraph used to be printed for every answer, including on a
- * machine with no tailnet — advice that was not merely unhelpful but described
- * a setup the operator did not have.
+ * **Why nothing is checked.** Classifying the answer cannot be made correct.
+ * On a Google Cloud VM the only address the guest holds is `10.128.0.2` — an
+ * RFC1918 address that the entire internet reaches through an external IP
+ * configured outside the guest. Calling that "private" would be a reassurance
+ * about a public deployment. AWS and Azure are the same, and the reverse case
+ * exists too: a routable address behind a firewall that answers nobody.
+ *
+ * So the consequence is stated once, before the prompt, and the answer is
+ * believed. The only validation is that it parses as an IPv4 address —
+ * loopback included, because this mode is named for knowing what you are
+ * doing.
  */
-function describeAddress(chosen: machine.Candidate): void {
-  ui.blank();
-  ui.step(`Your domain will point at ${chosen.address}, and Firetower answers there`);
-  ui.step("and nowhere else.");
-  ui.blank();
+export async function askCustomAddress(): Promise<Addressing> {
+  ui.notice([
+    "Firetower will be reached at the address you type, and will not",
+    "check it. We assume you know what you are doing.",
+    "",
+    "If that address is reachable from the internet, so are:",
+    "",
+    "  - The control plane (protected by login only)",
+    "      [holds your github secrets, your subscriptions,",
+    "       your worker ssh keys]",
+    "",
+    "  - Every preview you open from the Desktop client (no protection)",
+    "",
+    "A mesh VPN avoids all of it — Tailscale is free and takes 5 minutes.",
+  ]);
 
-  if (chosen.kind === "mesh") {
-    ui.step("Everyone who needs access has to be on the same tailnet — Tailscale");
-    ui.step("installed on their laptop and added to your network. Without it the");
-    ui.step("domain resolves and nothing answers.");
-  } else if (chosen.kind === "public") {
-    ui.warn(
-      "that address is reachable from the internet",
-      "the control plane holds every git token, every agent credential and the root key — the login page would be the only thing in front of them",
-    );
-  } else {
-    ui.step("Everyone who needs access has to be able to reach that address — on");
-    ui.step("this network, or over your VPN. Without it the domain resolves and");
-    ui.step("nothing answers.");
+  const typed = await prompts.text({
+    message: "Which address will people reach this on?",
+    placeholder: "34.79.12.180",
+    validate: (value) => (isIpv4(value) ? undefined : "not an IPv4 address"),
+  });
+  if (cancelled(typed)) stop("Nothing was written.");
+
+  const address = String(typed).trim();
+
+  // The one thing worth saying, and it is a fact about this machine rather
+  // than a judgement about the address: Caddy cannot listen on an address that
+  // is not here, so somebody has to say what it should listen on instead.
+  if (machine.localAddresses().includes(address)) {
+    ui.blank();
+    ui.ok(`Firetower will bind ${address}, and answer there and nowhere else.`);
+    ui.blank();
+
+    return { address, bind: address };
   }
 
   ui.blank();
+  ui.warn(`${address} is not an address of this machine`);
+  ui.step("A machine behind NAT, a floating IP or a load balancer is reached at");
+  ui.step("an address it does not hold — the traffic arrives on a different one.");
+  ui.step("Firetower cannot listen on an address that is not here.");
+  ui.blank();
+
+  const listen = await prompts.text({
+    message: "Which address should Firetower listen on?",
+    initialValue: ANY_INTERFACE,
+    validate: (value) => (isIpv4(value) ? undefined : "not an IPv4 address"),
+  });
+  if (cancelled(listen)) stop("Nothing was written.");
+
+  return { address, bind: String(listen).trim() };
+}
+
+/** Every interface — what a machine behind NAT has to bind. */
+export const ANY_INTERFACE = "0.0.0.0";
+
+/**
+ * Four decimal octets, and nothing more.
+ *
+ * Deliberately not a reachability test or a range check: see
+ * `askCustomAddress`. This exists so that a domain name typed into the address
+ * prompt is caught here rather than becoming an A record pointing at nothing.
+ */
+export function isIpv4(value: string): boolean {
+  const parts = value.trim().split(".");
+
+  return (
+    parts.length === 4 &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255)
+  );
 }
 
 /**
- * There is no address to offer, so there is no domain to configure.
+ * Nothing here looks like a mesh VPN, and mesh is what was asked for.
  *
- * Only reached when the machine has nothing but loopback — every other case
- * gets a list, including the one where the only entry is a bad idea. Stopping
- * here is better than the alternative it replaces, which was to finish the
- * install, obtain a real certificate and hand over a URL nobody can open.
+ * Stopping rather than falling through to the advanced path: they are
+ * different answers to a question that has just been asked, and quietly
+ * turning one into the other is how somebody ends up with a deployment on an
+ * address they did not choose.
  */
-function noReachableAddress(): never {
+function noMeshFound(): never {
+  const candidates = machine.candidateAddresses();
+
   ui.blank();
-  ui.step("A domain needs an address people can reach, and this machine has");
-  ui.step("none that anything outside it can route to.");
+  ui.warn("No mesh network detected (Tailscale, WireGuard, …)");
+  if (candidates.length > 0) {
+    ui.step(`This machine has ${candidates.map((c) => c.address).join(", ")}.`);
+  }
   ui.blank();
-  ui.step("The usual answer is Tailscale:");
+  ui.step("Install Tailscale, then run `firetower install` again:");
   ui.blank();
   ui.dim("  curl -fsSL https://tailscale.com/install.sh | sh");
   ui.dim("  sudo tailscale up");
   ui.blank();
-  ui.step("Then run `firetower domain` again.");
-  ui.blank();
-  ui.step("Until then `firetower tunnel` works and needs none of this.");
 
-  return stop("Nothing was written.");
+  return stop("Nothing was written.", "or run `firetower install` again and choose Advanced");
 }
 
 /**
- * The bind address for the flag path, where nobody can be asked.
+ * The addressing for the flag path, where nobody can be asked.
  *
- * `--https-bind` when it is given. Otherwise the single candidate, because
- * there is nothing to choose between — and a refusal naming the flag when
- * there is more than one, rather than picking the first and being quietly
- * wrong on exactly the machines this went wrong on.
+ * `--https-bind` is what Caddy listens on; `--advertise` is what people reach,
+ * for the machine behind NAT where those differ. Given neither, the single
+ * mesh address, because that is the one case with nothing to decide.
+ *
+ * Everything else is a refusal naming the flag. Unattended is exactly where a
+ * wrong answer goes unnoticed: the install finishes, the certificate is
+ * issued, and the failure arrives days later as a browser that hangs.
  */
-function bindFromFlags(options: ReachOptions): string {
-  const named = options.httpsBind?.trim();
-  if (named) return named;
+function addressFromFlags(options: ReachOptions): Addressing {
+  const bound = options.httpsBind?.trim();
+  const advertised = options.advertise?.trim();
+
+  if (bound) return { address: advertised || bound, bind: bound };
+
+  // Advertising without binding is answerable — bind everything — but only
+  // because the address was named deliberately. Guessing the bind from the
+  // interfaces here would pick the internal address on the exact machines this
+  // flag exists for.
+  if (advertised) return { address: advertised, bind: ANY_INTERFACE };
 
   const candidates = machine.candidateAddresses();
-  if (candidates.length === 0) noReachableAddress();
-
   const mesh = candidates.filter((candidate) => candidate.kind === "mesh");
 
-  // A single mesh address is the one case with nothing to decide. Everything
-  // else is a decision, and unattended is exactly where a wrong one goes
-  // unnoticed: the install finishes, the certificate is issued, and the failure
-  // arrives days later as a browser that hangs.
-  if (mesh.length === 1 && mesh[0]) return mesh[0].address;
+  if (mesh.length === 1 && mesh[0]) return { address: mesh[0].address, bind: mesh[0].address };
 
   if (mesh.length === 0) {
     return stop(
-      `nothing on this machine looks like a mesh VPN — only ${candidates.map((c) => c.address).join(", ")}`,
-      "if your people can reach one of those, name it with --https-bind. If they cannot, install Tailscale here first.",
+      candidates.length > 0
+        ? `nothing on this machine looks like a mesh VPN — only ${candidates.map((c) => c.address).join(", ")}`
+        : "nothing on this machine looks like a mesh VPN",
+      "name the address people will reach it on with --https-bind, or --advertise it and bind 0.0.0.0",
     );
   }
 
   return stop(
-    `this machine has several addresses — ${candidates.map((c) => c.address).join(", ")}`,
+    `this machine has several mesh addresses — ${mesh.map((c) => c.address).join(", ")}`,
     "name the one people will reach it on with --https-bind",
   );
 }
@@ -688,12 +691,14 @@ export interface Ports {
 /**
  * Which interface the control plane's port is published on.
  *
- * Loopback, in all three shapes, because the thing being published holds every
- * credential Firetower has. None of the three needs more:
+ * Loopback, in every shape, because the thing being published holds every
+ * credential Firetower has. Nothing needs more than that:
  *
- *   * a tunnel terminates on this machine and connects to 127.0.0.1 from here;
- *   * `domain` puts Caddy in front, and Caddy reaches 4400 over Compose's own
- *     network rather than through the published port;
+ *   * Caddy is in front, and reaches 4400 over Compose's own network rather
+ *     than through the published port;
+ *   * the two shapes that are no longer installed but still upgrade — a
+ *     loopback deployment reached over an ssh tunnel, and one behind a proxy
+ *     somebody already runs — both terminate on this machine as well;
  *   * a reverse proxy somebody already runs is on this machine — the one case
  *     where it might not be is rare enough to be worth setting HTTP_BIND by
  *     hand, and worth thinking about while doing it.
@@ -743,12 +748,17 @@ export function infer(values: env.Env): Reach {
       domain,
       dnsProvider: (values.DNS_PROVIDER ?? "").trim(),
       dnsToken: values.DNS_API_TOKEN ?? "",
-      // Same round trip, and for the same reason: `HTTPS_BIND` is in
-      // `env.OWNED`, so `upgrade` clears it and writes back whatever `derive`
-      // is given. Not reading it here would delete the bind from a working
-      // deployment on an upgrade that changed nothing else — which is exactly
-      // what happened before it was derived at all.
-      address: (values.HTTPS_BIND ?? "").trim(),
+      // Same round trip, and for the same reason: both are in `env.OWNED`, so
+      // `upgrade` clears them and writes back whatever `derive` is given. Not
+      // reading them here would delete the bind from a working deployment on
+      // an upgrade that changed nothing else — which is exactly what happened
+      // before it was derived at all.
+      //
+      // `HTTPS_ADVERTISE` is absent on every deployment written before it
+      // existed, and on every one where the two are the same — so the bind is
+      // the fallback, which is what those deployments meant.
+      address: (values.HTTPS_ADVERTISE || values.HTTPS_BIND || "").trim(),
+      bind: (values.HTTPS_BIND ?? "").trim(),
     };
   }
 
@@ -811,12 +821,23 @@ export function derive(reach: Reach, ports: Ports): env.Env {
     // and without this line the server would go on minting `*.localhost`
     // previews that resolve to the browser's own machine.
     ...(reach.kind === "domain" ? { FIRETOWER_PREVIEW_DOMAIN: reach.domain } : {}),
-    // Caddy's interface, and the other half of the address in the records
-    // above. Derived rather than left to the operator: it is in `env.OWNED`, so
-    // a value written by hand was deleted by the next `upgrade` or `domain` and
-    // never written back — silently rebinding Caddy to 0.0.0.0, which on a
-    // machine with a public IP is the whole front door.
-    ...(reach.kind === "domain" && reach.address ? { HTTPS_BIND: reach.address } : {}),
+    // Caddy's interface. Derived rather than left to the operator: it is in
+    // `env.OWNED`, so a value written by hand was deleted by the next
+    // `upgrade` or `domain` and never written back — silently rebinding Caddy
+    // to 0.0.0.0, which on a machine with a public IP is the whole front door.
+    ...(reach.kind === "domain" && reach.bind ? { HTTPS_BIND: reach.bind } : {}),
+    // The address people reach it on, and the only value this CLI writes that
+    // no container reads. It is here because it is not re-derivable: on a
+    // machine behind NAT the address in the DNS records is on a router
+    // somewhere, and nothing on this box remembers it. `doctor` compares
+    // against it and `domain` reprints the records from it, and having them
+    // each work it out separately is how the two come to disagree.
+    //
+    // Written only when it differs from the bind, so the ordinary deployment's
+    // `.env` does not grow a line that restates the one above it.
+    ...(reach.kind === "domain" && reach.address && reach.address !== reach.bind
+      ? { HTTPS_ADVERTISE: reach.address }
+      : {}),
     // Only when the release reads them. Writing a value nothing honours is how
     // somebody ends up sure they changed a port that never moved.
     ...(ports.configurable
@@ -848,22 +869,17 @@ export interface PortOptions {
 export type Held = ReadonlySet<number>;
 
 /**
- * Which ports this machine publishes.
+ * Which ports this machine publishes. Two different things:
  *
- * Two different things, and they moved apart when Caddy stopped being created
- * for every install:
+ *   * `HTTP_PORT` is the control plane's own, published on loopback. Nothing
+ *     outside this machine reaches it directly.
+ *   * `HTTPS_PORT` is Caddy's, and it is the one other people actually open.
  *
- *   * `HTTP_PORT` is the control plane's own, published on loopback in every
- *     shape. This is the one an ssh tunnel forwards.
- *   * `HTTPS_PORT` is Caddy's, and only exists in the `domain` shape, where it
- *     is the address other people actually open.
- *
- * The control plane's port wants to be a high one. A tunnel is easiest when
- * both sides are the same number — that way the address in the browser matches
- * FIRETOWER_PUBLIC_URL — and a forward onto a port below 1024 needs root on the
- * *operator's* machine, which is a strange thing to make somebody do to read a
- * dashboard. In the `domain` shape it is not merely preferable: Caddy publishes
- * 80 there, so leaving the control plane on 80 would collide.
+ * The control plane's port has to be a high one, and in the shape that
+ * installs today that is not a preference: Caddy publishes 80 to redirect, so
+ * leaving the control plane there would collide. 8080 also keeps the older
+ * loopback deployments — which still upgrade — forwardable without root on the
+ * far end, a forward onto a port below 1024 needing it.
  */
 export async function choosePorts(
   reach: Reach,
@@ -1077,57 +1093,6 @@ export function publicUrl(reach: Reach, ports: Pick<Ports, "http" | "https">): s
   return ports.http === 80 ? "http://localhost" : `http://localhost:${ports.http}`;
 }
 
-/**
- * The tunnel, as this CLI's own command rather than as ssh.
- *
- * What the closing screen prints. `tunnelCommand` below stays for the one place
- * that genuinely wants the raw line — `tunnel --ssh-config`, for somebody with
- * no Node on the machine they are sitting at.
- *
- * `--remote-port` is passed explicitly even though `tunnel` can read it off the
- * remote `.env`, because at this moment we *know* it, and reading it involves
- * an ssh round trip that fails on a deployment whose `.env` the operator's
- * account cannot read.
- */
-export function firetowerTunnelCommand(port: number, destination?: string): string {
-  const target = destination ?? `${userOnThisMachine()}@${hostname()}`;
-
-  return `firetower tunnel ${target} --remote-port ${port}`;
-}
-
-/**
- * The command that actually reaches a loopback install.
- *
- * Both sides on the same number on purpose: it is what makes the address in
- * the browser match FIRETOWER_PUBLIC_URL, and every preview link along with
- * it. The three options are not decoration —
- *
- *   * ServerAliveInterval/CountMax notice a dead forward in about a minute,
- *     instead of leaving a tunnel that looks up and answers nothing;
- *   * ExitOnForwardFailure makes "that port is already taken here" an error
- *     rather than an ssh session that connected and forwarded nothing.
- */
-export function tunnelCommand(port: number, destination?: string): string {
-  const target = destination ?? `${userOnThisMachine()}@${hostname()}`;
-
-  return (
-    `ssh -N -L ${port}:${LOOPBACK}:${port} ` +
-    `-o ServerAliveInterval=20 -o ServerAliveCountMax=3 ` +
-    `-o ExitOnForwardFailure=yes ${target}`
-  );
-}
-
-/**
- * A best guess at what to type, rather than a placeholder to fill in.
- *
- * Usually right on a VPS, and wrong in a way that is obvious when it is wrong
- * — which is better than `<user>@<host>`, because that has to be edited even
- * when the guess would have been correct.
- */
-function userOnThisMachine(): string {
-  return process.env.SUDO_USER ?? process.env.USER ?? userInfo().username;
-}
-
 /** How this deployment is reached, in one line, for a plan block. */
 export function describe(reach: Reach): string {
   if (reach.kind === "domain") return `${reach.domain}, over HTTPS`;
@@ -1160,11 +1125,14 @@ export function published(reach: Reach, ports: Ports): string {
     : `every interface, on ${ports.http}`;
 
   if (reach.kind === "domain") {
-    // The address, not just the ports. "for everyone else" was true of the
-    // 0.0.0.0 this used to bind, and is the wrong thing to say once Caddy is
-    // held to one interface — the line people read to check that.
-    const where = reach.address || "every interface";
-    return `${control} — and Caddy on ${where}, ports ${ports.https} and 80`;
+    // The bind, not the advertised address, and not just the ports. This is
+    // the line people read to check what is actually listening — so on a
+    // machine behind NAT it has to say `0.0.0.0` rather than the friendlier
+    // address in the DNS records.
+    const where = !reach.bind || reach.bind === ANY_INTERFACE ? "every interface" : reach.bind;
+    const reached = reach.address && reach.address !== reach.bind ? `, reached at ${reach.address}` : "";
+
+    return `${control} — and Caddy on ${where}${reached}, ports ${ports.https} and 80`;
   }
 
   return control;

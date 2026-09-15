@@ -87,6 +87,7 @@ describe("infer", () => {
       dnsProvider: "cloudflare",
       dnsToken: "a-token",
       address: "100.64.0.1",
+      bind: "100.64.0.1",
     });
   });
 
@@ -148,6 +149,7 @@ describe("derive", () => {
       dnsProvider: "cloudflare",
       dnsToken: "a-token",
       address: "100.64.0.1",
+      bind: "100.64.0.1",
     };
     const values = derive(reach, { http: 8080, https: 443, ...bound });
 
@@ -204,6 +206,7 @@ describe("choosePorts", () => {
       dnsProvider: "cloudflare",
       dnsToken: "a-token",
       address: "100.64.0.1",
+      bind: "100.64.0.1",
     };
     const ports = await choosePorts(reach, CURRENT, {}, new Set());
 
@@ -423,6 +426,7 @@ describe("changing reach on an existing deployment", () => {
     dnsProvider: "cloudflare",
     dnsToken: "a-token",
     address: "100.64.0.1",
+    bind: "100.64.0.1",
   };
 
   it("adds everything the tls profile needs, and nothing else", () => {
@@ -469,5 +473,66 @@ describe("changing reach on an existing deployment", () => {
     expect(removed).not.toHaveProperty("HTTPS_BIND");
     expect(removed.FIRETOWER_PUBLIC_URL).toBe("http://localhost:8085");
     expect(removed.POSTGRES_PASSWORD).toBe("kept-secret");
+  });
+});
+
+/**
+ * The address that is reached, and the address that is listened on.
+ *
+ * One field until a Google Cloud VM made them two. There the guest holds only
+ * `10.128.0.2` — the external address is 1:1 NAT outside the VM and appears on
+ * no interface — so Caddy has nothing to bind but `0.0.0.0`, while the DNS
+ * records have to name an address this machine has never heard of. AWS and
+ * Azure are the same shape, and so is a floating IP or a load balancer.
+ */
+describe("the advertised address", () => {
+  const behindNat: Reach = {
+    kind: "domain",
+    domain: "ft.example.com",
+    dnsProvider: "cloudflare",
+    dnsToken: "a-token",
+    address: "34.79.12.180",
+    bind: "0.0.0.0",
+  };
+
+  const ports: Ports = { http: 8080, https: 443, configurable: true, bindable: true };
+
+  it("writes both when they differ, because neither can be worked out from the other", () => {
+    const values = derive(behindNat, ports);
+
+    expect(values.HTTPS_BIND).toBe("0.0.0.0");
+    expect(values.HTTPS_ADVERTISE).toBe("34.79.12.180");
+  });
+
+  it("writes only the bind when they are the same", () => {
+    // The ordinary deployment, and the reason this is conditional: a line
+    // restating the one above it is a line somebody later reads as meaningful.
+    const values = derive({ ...behindNat, address: "100.64.0.1", bind: "100.64.0.1" }, ports);
+
+    expect(values.HTTPS_BIND).toBe("100.64.0.1");
+    expect(values.HTTPS_ADVERTISE).toBeUndefined();
+  });
+
+  it("reads both back, so an upgrade does not lose the advertised one", () => {
+    // `HTTPS_ADVERTISE` is in `env.OWNED`, so `reshape` clears it and writes
+    // back whatever `derive` is given. Not reading it here would silently move
+    // a deployment behind NAT onto an address nobody can reach.
+    const read = infer({ DOMAIN: "ft.example.com", HTTPS_BIND: "0.0.0.0", HTTPS_ADVERTISE: "34.79.12.180" });
+
+    expect(read).toMatchObject({ address: "34.79.12.180", bind: "0.0.0.0" });
+  });
+
+  it("falls back to the bind for every deployment written before it existed", () => {
+    const read = infer({ DOMAIN: "ft.example.com", HTTPS_BIND: "100.64.0.1" });
+
+    expect(read).toMatchObject({ address: "100.64.0.1", bind: "100.64.0.1" });
+  });
+
+  it("survives the round trip an upgrade actually performs", () => {
+    const before = { DOMAIN: "ft.example.com", HTTPS_BIND: "0.0.0.0", HTTPS_ADVERTISE: "34.79.12.180" };
+    const after = env.reshape(before, derive(infer(before), ports));
+
+    expect(after.HTTPS_BIND).toBe("0.0.0.0");
+    expect(after.HTTPS_ADVERTISE).toBe("34.79.12.180");
   });
 });

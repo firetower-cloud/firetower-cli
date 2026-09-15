@@ -6,7 +6,6 @@ import { cliVersion } from "./version.js";
 import { gate } from "./selfcheck.js";
 import { install } from "./commands/install.js";
 import { domain } from "./commands/domain.js";
-import { tunnel } from "./commands/tunnel.js";
 import { upgrade } from "./commands/upgrade.js";
 import { status } from "./commands/status.js";
 import { doctor } from "./commands/doctor.js";
@@ -89,7 +88,10 @@ program
   )
   .option("--dns-token <token>", "API token for --dns-provider")
   .option("--https-bind <address>", "the address Caddy listens on, with --domain")
-  .option("--public-url <url>", "not supported yet — see the README")
+  .option(
+    "--advertise <address>",
+    "the address people reach it on, when it is not the one it listens on — behind NAT, a floating IP or a load balancer",
+  )
   .option("--http-port <port>", "publish the control plane here instead of 8080", port)
   .option("--https-port <port>", "publish Caddy here instead of 443, with --domain", port)
   .option("--admin-username <name>", "the first administrator", "admin")
@@ -104,7 +106,6 @@ program
       dir,
       yes,
       domain: options.domain,
-      publicUrl: options.publicUrl,
       httpPort: options.httpPort,
       httpsPort: options.httpsPort,
       adminUsername: options.adminUsername,
@@ -112,24 +113,32 @@ program
       dnsProvider: options.dnsProvider,
       dnsToken: options.dnsToken,
       httpsBind: options.httpsBind,
+      advertise: options.advertise,
       tag: options.tag,
     });
   });
 
+/**
+ * Gone, and named rather than merely absent.
+ *
+ * It forwarded a control plane published on loopback, which is no longer a
+ * shape this CLI installs. Removing the command outright would meet anybody
+ * with it in a script or an ssh alias as `error: unknown command`, which says
+ * nothing about what happened or what to do instead. Kept as a refusal for a
+ * release or two.
+ */
 program
-  .command("tunnel")
-  .description("forward a loopback control plane to this machine, over ssh")
-  .argument("<destination>", "user@host, or an ssh config alias")
-  .option("--local-port <port>", "listen here instead of the remote port", port)
-  .option("--remote-port <port>", "skip reading the remote .env and use this", port)
-  .option("--ssh-config", "print an ~/.ssh/config stanza instead of connecting")
-  .action(async (destination, options) => {
-    await tunnel({
-      destination,
-      localPort: options.localPort,
-      remotePort: options.remotePort,
-      sshConfig: options.sshConfig,
-    });
+  .command("tunnel", { hidden: true })
+  .argument("[destination]")
+  .allowUnknownOption()
+  .action(() => {
+    ui.blank();
+    ui.fail(
+      "`firetower tunnel` is gone",
+      "it forwarded a control plane on loopback, and that shape no longer installs. Reach this deployment on its domain.",
+    );
+    ui.blank();
+    process.exit(1);
   });
 
 program
@@ -143,19 +152,20 @@ program
   )
   .option("--dns-token <token>", "API token for --dns-provider")
   .option("--https-bind <address>", "the address Caddy listens on")
-  .option("--public-url <url>", "not supported yet — see the README")
-  .option("--none", "remove the domain and go back to loopback")
+  .option(
+    "--advertise <address>",
+    "the address people reach it on, when it is not the one it listens on",
+  )
   .action(async (name, options) => {
     const { dir, yes } = globals();
     await domain({
       dir,
       yes,
       domain: name,
-      publicUrl: options.publicUrl,
       dnsProvider: options.dnsProvider,
       dnsToken: options.dnsToken,
       httpsBind: options.httpsBind,
-      none: options.none,
+      advertise: options.advertise,
     });
   });
 

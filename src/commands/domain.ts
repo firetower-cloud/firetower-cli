@@ -21,7 +21,6 @@ import {
   printRecords,
   stop,
   suppliesOwnCertificate,
-  tunnelCommand,
   type Reach,
   type ReachOptions,
 } from "../shape.js";
@@ -51,15 +50,13 @@ import { ui, pc } from "../ui.js";
  * that change are the values in `.env` that follow from the answer, and the
  * containers that have to be recreated to read them.
  *
- * It goes both ways. Naming a domain adds the proxy and the certificate;
- * `--none` takes them away again and puts the deployment back on loopback.
+ * What it cannot do any more is take a domain away. Loopback stopped being a
+ * shape that installs, so `--none` had nowhere to put the deployment.
  */
 export interface DomainOptions extends ReachOptions {
   dir?: string;
   httpPort?: number;
   httpsPort?: number;
-  /** Remove the domain and go back to loopback. */
-  none?: boolean;
 }
 
 export async function domain(options: DomainOptions): Promise<void> {
@@ -70,18 +67,14 @@ export async function domain(options: DomainOptions): Promise<void> {
   const deployment = await openDeployment(dir);
   const before = infer(deployment.env);
 
-  // Unattended, "no arguments" is not an answer — and the answer it would fall
-  // to is the destructive one. `askReach` reads `--yes` with no domain as the
-  // loopback shape, which is right for `install` onto a bare machine and would
-  // mean "remove the domain" here.
-  if (options.yes && !options.none && options.domain === undefined && !options.publicUrl) {
+  // Unattended, "no arguments" is not an answer. `askReach` refuses a `--yes`
+  // with no domain, which is the right answer for `install` and a confusing
+  // one here — this says what this command wanted instead.
+  if (options.yes && options.domain === undefined) {
     const adjusting = options.dnsProvider !== undefined || options.dnsToken !== undefined;
 
     if (!adjusting || before.kind !== "domain") {
-      stop(
-        "say what to change it to",
-        "a domain, or --public-url for your own proxy, or --none to go back to loopback",
-      );
+      stop("say what to change it to", "a domain, and optionally --dns-provider or --dns-token");
     }
   }
 
@@ -89,11 +82,7 @@ export async function domain(options: DomainOptions): Promise<void> {
   ui.dim(`reached by    ${describe(before)}`);
   ui.blank();
 
-  // `--none` is the way back, and it is a different answer rather than an
-  // absent one: `askReach` reads a missing `--domain` as "ask me".
-  const reach = options.none
-    ? ({ kind: "local" } as Reach)
-    : await askReach(carryForward(options, before));
+  const reach = await askReach(carryForward(options, before));
 
   refuseIfItCannotIssue(reach, deployment.compose);
 
@@ -105,7 +94,12 @@ export async function domain(options: DomainOptions): Promise<void> {
     ui.blank();
     ui.step("Checking DNS");
 
-    const result = await domainResolves.run({ dir, domain: reach.domain });
+    const result = await domainResolves.run({
+      dir,
+      domain: reach.domain,
+      httpsBind: reach.bind,
+      advertise: reach.address,
+    });
     if (result.status === "ok") ui.ok(result.name, result.detail);
     else if (result.status === "warn") ui.warn(`${result.name}  ${result.detail}`, result.remedy);
     else ui.fail(`${result.name}  ${result.detail}`, result.remedy);
@@ -208,7 +202,11 @@ function carryForward(options: DomainOptions, before: Reach): DomainOptions {
     // Same reasoning as the three above, and the same consequence for leaving
     // it out: `derive` writes `HTTPS_BIND` from this, so rotating a token
     // without it would rebind Caddy from a tailnet address to every interface.
-    httpsBind: options.httpsBind ?? before.address,
+    httpsBind: options.httpsBind ?? before.bind,
+    // And the other half, for a deployment behind NAT: without it a rotated
+    // token would leave the bind alone and quietly drop the address the DNS
+    // records actually name.
+    advertise: options.advertise ?? before.address,
   };
 }
 
@@ -491,15 +489,6 @@ function finish(
     // that is done somewhere else — in a DNS console — and the one most likely
     // to be missing when somebody reports that it does not work.
     printRecords(reach.domain, reach.address, reach.dnsProvider);
-
-  }
-
-  if (reach.kind === "local") {
-    ui.step("Nothing is published on this machine's network any more. From your");
-    ui.step("laptop, bring up a tunnel first:");
-    ui.blank();
-    ui.dim(`  ${tunnelCommand(ports.http)}`);
-    ui.blank();
   }
 
   ui.dim(`  ${next.FIRETOWER_PUBLIC_URL}`);

@@ -21,7 +21,7 @@ import {
   publicUrl,
   stop,
   suppliesOwnCertificate,
-  firetowerTunnelCommand,
+  ANY_INTERFACE,
   type Ports,
   type Reach,
   type ReachOptions,
@@ -43,7 +43,7 @@ import { ui, pc } from "../ui.js";
  * anything, and the two commands agreeing about what a deployment looks like is
  * the whole reason that module exists.
  */
-export { publicUrl, certificate, published, firetowerTunnelCommand, type Reach };
+export { publicUrl, certificate, published, type Reach };
 
 export interface InstallOptions extends ReachOptions {
   dir?: string;
@@ -97,6 +97,11 @@ export async function install(options: InstallOptions): Promise<void> {
     {
       dir: dir ?? process.cwd(),
       domain: reach.kind === "domain" ? reach.domain : null,
+      // Both, so the DNS check knows what the records are supposed to say.
+      // On a machine behind NAT that is the advertised address and never the
+      // bind, which is `0.0.0.0` and not something an A record can name.
+      httpsBind: reach.kind === "domain" ? reach.bind : null,
+      advertise: reach.kind === "domain" ? reach.address : null,
       httpPort: ports.http,
       httpsPort: ports.https,
     },
@@ -198,7 +203,7 @@ export async function install(options: InstallOptions): Promise<void> {
   // a URL that answers a browser with ERR_SSL_PROTOCOL_ERROR.
   const waited = await waitForCertificates(directory, files.compose, reach, ports);
 
-  finish(values, admin, reach, ports);
+  finish(values, admin, reach);
 
   if (waited?.ready === false) reportMissing(directory, waited.missing);
 }
@@ -263,7 +268,7 @@ async function refuseIfInstalled(directory: string): Promise<void> {
 
   stop(
     `Firetower is already installed in ${directory}.`,
-    "`firetower domain` changes how it is reached — adding a name, or taking one away. `firetower upgrade` moves it to a newer release.",
+    "`firetower domain` changes how it is reached — the name, or the address. `firetower upgrade` moves it to a newer release.",
   );
 }
 
@@ -495,9 +500,14 @@ async function pull(directory: string): Promise<void> {
 /**
  * Hold the ending until Caddy can actually serve the URL about to be printed.
  *
- * Only where there is a certificate coming — see `willObtainCertificate`. The
- * bind is `HTTPS_BIND`, because that is the only address Caddy answers on and
- * loopback is not it.
+ * Only where there is a certificate coming — see `willObtainCertificate`.
+ *
+ * **Which address this connects to** is the bind rather than the advertised
+ * one, because this runs on the machine Caddy is on. Where the two differ the
+ * advertised address is unreachable from here: a Google Cloud VM cannot open a
+ * connection to its own external IP, so checking there would time out against
+ * a proxy that is serving perfectly. `0.0.0.0` means every interface, which
+ * includes loopback, and loopback is the one address that is certain to work.
  */
 async function waitForCertificates(
   directory: string,
@@ -507,7 +517,8 @@ async function waitForCertificates(
 ): Promise<Waited | null> {
   if (!willObtainCertificate(reach) || reach.kind !== "domain") return null;
 
-  const where = { host: reach.address, port: ports.https, domain: reach.domain };
+  const host = !reach.bind || reach.bind === ANY_INTERFACE ? "127.0.0.1" : reach.bind;
+  const where = { host, port: ports.https, domain: reach.domain };
 
   ui.blank();
 
@@ -573,27 +584,24 @@ async function backUpTheKey(
   }
 }
 
+/**
+ * One screen, for every deployment.
+ *
+ * It used to carry a second half for the loopback shape — "from your laptop,
+ * bring up a tunnel first" — and working out which machine the operator was
+ * sitting at to decide whether to print it was never reliable:
+ * `SSH_CONNECTION` and `SSH_TTY` are the only signals and `sudo` strips both,
+ * which fails towards "you are local" on a server. The shape it served no
+ * longer installs, so the question is gone with it.
+ */
 function finish(
   values: env.Env,
   admin: { username: string; password: string },
   reach: Reach,
-  ports: Ports,
 ): void {
   ui.blank();
   ui.step(pc.bold("Firetower is running."));
   ui.blank();
-
-  // One screen for both cases, deliberately. This used to say "reach it from
-  // your own machine with a tunnel" unconditionally, which is nonsense when
-  // Firetower has just been installed on the laptop the operator is sitting at
-  // — there is no tunnel and never was.
-  //
-  // Detecting which it is looked easy and is not: `SSH_CONNECTION` and
-  // `SSH_TTY` are the only signals, `sudo` strips both by default, and
-  // `install` is routinely run under sudo. That fails towards "you are local"
-  // on a server, silently, and there is no signal that fails the other way. So
-  // print the URL, then the tunnel as the next step for whoever is not here.
-  // Two extra lines to somebody at the machine, and never wrong.
 
   // Said at the end as well as at the prompt, because the flag path never sees
   // the prompt — `--dns-provider route53` would otherwise finish with "Firetower
@@ -610,13 +618,6 @@ function finish(
 
   ui.dim(`  ${values.FIRETOWER_PUBLIC_URL}`);
   ui.blank();
-
-  if (reach.kind === "local") {
-    ui.step("That works on this machine. From your laptop, bring up a tunnel first:");
-    ui.blank();
-    ui.dim(`  ${firetowerTunnelCommand(ports.http)}`);
-    ui.blank();
-  }
 
   ui.dim(`  username  ${admin.username}`);
   ui.dim(`  password  ${admin.password}`);

@@ -43,6 +43,16 @@ export interface Context {
    */
   httpsBind?: string | null;
   /**
+   * The address people reach it on, from `HTTPS_ADVERTISE`, when that is not
+   * the address Caddy listens on.
+   *
+   * Set on a machine behind NAT, a floating IP or a load balancer, where the
+   * records name an address this machine does not hold. That is what the
+   * domain is supposed to resolve to; the bind is not, and comparing against
+   * the bind there asks people to point an A record at `0.0.0.0`.
+   */
+  advertise?: string | null;
+  /**
    * The ports this deployment publishes. Absent means the defaults, which is
    * what every deployment older than `HTTP_PORT` has.
    */

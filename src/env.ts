@@ -75,6 +75,11 @@ export const OWNED = [
   "HTTPS_PORT",
   "HTTP_BIND",
   "HTTPS_BIND",
+  // The address people reach it on, when that is not the address Caddy listens
+  // on — a machine behind NAT, a floating IP, a load balancer. The only value
+  // here that no container reads: it is written because it cannot be derived
+  // back, and `doctor` and `domain` both need it. See `shape.derive`.
+  "HTTPS_ADVERTISE",
   "COMPOSE_PROFILES",
   "FIRETOWER_PUBLIC_URL",
   "FIRETOWER_PREVIEW_DOMAIN",
@@ -322,9 +327,8 @@ export function format(values: Env): string {
 # Everything here is a secret or a decision. Nothing regenerates it: re-running
 # \`firetower install\` reads this file first and fills only what is missing.
 
-# Where you reach Firetower. Blank serves plain HTTP, which is what you want
-# when nothing outside this machine reaches it, and when a reverse proxy you
-# already run is the thing holding the certificate.
+# Where you reach Firetower. Every deployment has one: previews are served at
+# \`<session>-<port>-<signature>.this-domain\`, so a name is not optional.
 ${line("DOMAIN")}
 # How the certificate for that name is obtained, and it is obtained without
 # this machine being reachable from the internet. Caddy answers a DNS-01
@@ -359,27 +363,35 @@ ${line("ACME_EMAIL")}
 # interface and API directly, and no proxy is created at all.
 ${line("COMPOSE_PROFILES")}
 # Where the control plane is published, and this pair is not cosmetic. It holds
-# every git token, every agent credential and the root key, so it goes on
-# loopback and is reached over an ssh tunnel:
-#
-#   ssh -N -L PORT:127.0.0.1:PORT you@this-machine
+# every git token, every agent credential and the root key, so it stays on
+# loopback with Caddy in front of it — Caddy reaches it over Compose's own
+# network and not through this published port.
 #
 # HTTP_PORT is the control plane's own port, not Caddy's. Widening HTTP_BIND to
 # 0.0.0.0 puts the vault on the network, and \`ufw deny\` will not stop it —
 # Docker's DNAT rules are consulted before the host's INPUT chain.
 ${line("HTTP_BIND")}${line("HTTP_PORT")}
-# Caddy's, and only read with the tls profile on above. 443 unless something
-# else on this machine already holds it.
+# Caddy's port, and only read with the tls profile on above. 443 unless
+# something else on this machine already holds it.
 ${line("HTTPS_PORT")}
+# Which interface Caddy listens on — the front door, and the one address it
+# answers on. A tailnet address serves your tailnet and nothing else; 0.0.0.0
+# serves whatever reaches this machine, which on a host with a public NIC is
+# the internet.
+${line("HTTPS_BIND")}
+# Only when the address people reach is not one this machine holds: behind NAT,
+# a floating IP, or a load balancer. Google Cloud, AWS and Azure each put an
+# external address outside the guest, so Caddy binds 0.0.0.0 and this is what
+# the DNS records point at. \`firetower doctor\` checks them against it.
+${line("HTTPS_ADVERTISE")}
 # Only used for the URL printed on the first start and in notifications —
 # Firetower listens on 4400 inside its container and cannot know what is in
-# front of it. The port belongs in here: over a tunnel the browser is at
-# \`localhost:8080\`, and a URL saying \`localhost\` sends somebody to port 80 on
-# their own machine.
+# front of it. The port belongs in here whenever Caddy is not on 443, or every
+# link it prints sends people somewhere nothing is listening.
 ${line("FIRETOWER_PUBLIC_URL")}
-# What a session's preview hangs off. \`localhost\` needs no DNS at all — every
-# browser resolves anything under it to the machine it is running on. With a
-# domain, this is that domain, and \`*.that-domain\` needs a DNS record.
+# What a session's preview hangs off: this is the domain above, and
+# \`*.that-domain\` needs its own DNS record. Without the wildcard you get an
+# interface that works and previews that do not resolve at all.
 #
 # **The hostname is the credential**: it carries a signature, and anyone holding
 # one reaches that port of that session. Treat one like a share link.

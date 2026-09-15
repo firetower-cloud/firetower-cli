@@ -199,6 +199,7 @@ describe("when there is nothing to wait for", () => {
     dnsProvider: "cloudflare",
     dnsToken: "t",
     address: "100.64.0.1",
+    bind: "100.64.0.1",
     ...over,
   });
 

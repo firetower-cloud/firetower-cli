@@ -225,16 +225,36 @@ export const exposure: Check = {
 
     // Unset is the compose file's own default, which is loopback.
     if (bind === undefined || bind === "" || isLoopback(bind)) {
-      return ok("exposure", `control plane on ${bind || "127.0.0.1"}`);
+      return ok("exposure", `control plane on ${bind || "127.0.0.1"}${front(deployment.env)}`);
     }
 
     return fail(
       "exposure",
       `the control plane is published on ${bind}`,
-      "set HTTP_BIND=127.0.0.1 in .env and restart. Reach it with `firetower tunnel`, or put a certificate in front with the tls profile.",
+      "set HTTP_BIND=127.0.0.1 in .env and restart, and reach it on its domain instead.",
     );
   },
 };
+
+/**
+ * Where the proxy in front is listening, and where it is reached.
+ *
+ * Stated, not judged. Whether `0.0.0.0` is a mistake is not answerable from
+ * here — on a machine behind NAT it is the only possible answer, and on one
+ * with a public NIC it is the front door — so this reports the two facts and
+ * leaves the reading to whoever chose them.
+ */
+function front(values: Record<string, string>): string {
+  const bind = (values.HTTPS_BIND ?? "").trim();
+  if (!bind) return "";
+
+  const advertised = (values.HTTPS_ADVERTISE ?? "").trim();
+  const where = bind === "0.0.0.0" ? "every interface" : bind;
+
+  return advertised && advertised !== bind
+    ? `, Caddy on ${where}, reached at ${advertised}`
+    : `, Caddy on ${where}`;
+}
 
 const isLoopback = (bind: string): boolean =>
   bind === "127.0.0.1" || bind === "::1" || bind.startsWith("127.");

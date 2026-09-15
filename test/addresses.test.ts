@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { networkInterfaces } from "node:os";
 import { candidateAddresses } from "../src/checks/machine.js";
+import { isIpv4 } from "../src/shape.js";
 
 vi.mock("node:os", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:os")>()),
@@ -90,5 +91,43 @@ describe("candidateAddresses", () => {
     mocked.mockReturnValue({ eth0: [addr("fe80::1"), addr("192.168.1.50")] });
 
     expect(candidateAddresses().map((c) => c.address)).toEqual(["192.168.1.50"]);
+  });
+});
+
+/**
+ * What the advanced prompt accepts.
+ *
+ * Syntax only, and that is the whole policy. Classifying the answer cannot be
+ * made correct — on a Google Cloud VM `10.128.0.2` is an RFC1918 address the
+ * entire internet reaches — so the only thing worth catching here is a value
+ * that could never be an A record at all.
+ */
+describe("isIpv4", () => {
+  it("takes four octets", () => {
+    for (const value of ["34.79.12.180", "10.0.0.5", "0.0.0.0", "255.255.255.255", "127.0.0.1"]) {
+      expect(isIpv4(value)).toBe(true);
+    }
+  });
+
+  it("takes one with spaces around it, which is what a paste looks like", () => {
+    expect(isIpv4("  100.69.206.104 ")).toBe(true);
+  });
+
+  it("refuses a domain name, which is the mistake worth catching", () => {
+    // Typed into the address prompt it would become an A record pointing at
+    // nothing, and the failure would arrive as a browser that hangs.
+    expect(isIpv4("firetower.example.com")).toBe(false);
+  });
+
+  it("refuses what is not an address", () => {
+    for (const value of ["", "1.2.3", "1.2.3.4.5", "256.1.1.1", "1.2.3.-1", "::1", "1.2.3.x"]) {
+      expect(isIpv4(value)).toBe(false);
+    }
+  });
+
+  it("does not judge what kind of address it is", () => {
+    // Loopback included. `firetower install` says it assumes you know what you
+    // are doing, and this is where that promise is kept.
+    expect(isIpv4("127.0.0.1")).toBe(true);
   });
 });

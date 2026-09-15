@@ -29,20 +29,27 @@ export async function doctor(options: DoctorOptions): Promise<void> {
 
   // The domain the deployment actually uses, so the check is about this
   // installation rather than about nothing.
+  //
+  // Both halves of the address, because on a machine behind NAT they are
+  // different answers: the records name what `HTTPS_ADVERTISE` holds, and the
+  // bind is `0.0.0.0`, which no A record can point at.
   let domain: string | null = null;
   let httpsBind: string | null = null;
+  let advertise: string | null = null;
   if (dir) {
     try {
       const values = env.parse(await readFile(join(dir, ".env"), "utf8"));
       domain = values.DOMAIN || null;
       httpsBind = values.HTTPS_BIND || null;
+      advertise = values.HTTPS_ADVERTISE || null;
     } catch {
       domain = null;
       httpsBind = null;
+      advertise = null;
     }
   }
 
-  const results = await runChecks(checks, { dir, domain, httpsBind });
+  const results = await runChecks(checks, { dir, domain, httpsBind, advertise });
 
   if (options.json) {
     ui.json({ dir, status: worst(results), checks: results });

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { execa } from "execa";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as docker from "../src/docker.js";
@@ -57,11 +57,118 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+/**
+ * The shape this installs, and why it is the cheap one.
+ *
+ * Every install has a domain now, so every install creates Caddy — there is no
+ * longer a shape with no proxy to test. `--dns-provider none` is the one that
+ * costs least: the Dockerfile's build step exits early for it rather than
+ * compiling Caddy from source, and nothing here waits on a certificate,
+ * because the operator is the one supplying it.
+ *
+ * The two certificate files are written *before* `install` runs, so that
+ * `requireCertificate` finds them and the run finishes rather than stopping to
+ * ask for them. They are not valid and nothing here pretends otherwise: what is
+ * asserted below is what Docker published, not what Caddy served.
+ */
+const DOMAIN = "ft.e2e.invalid";
+const BIND = "127.0.0.1";
+
+async function placeCertificates(into: string): Promise<void> {
+  const certs = join(into, "certs");
+  await mkdir(certs, { recursive: true });
+
+  // A real self-signed certificate rather than a placeholder, because two of
+  // `doctor`'s checks read it: one parses the expiry, and the other only
+  // passes if Caddy started, which it will not do without something it can
+  // parse. Written through a config file rather than `-addext`, which
+  // LibreSSL — what macOS ships as `openssl` — has not always had.
+  const config = join(into, "openssl.cnf");
+  await writeFile(
+    config,
+    [
+      "[req]",
+      "distinguished_name = dn",
+      "x509_extensions = ext",
+      "prompt = no",
+      "[dn]",
+      `CN = ${DOMAIN}`,
+      "[ext]",
+      "basicConstraints = critical,CA:FALSE",
+      `subjectAltName = DNS:${DOMAIN}, DNS:*.${DOMAIN}`,
+    ].join("\n"),
+  );
+
+  await execa("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "30",
+    "-keyout",
+    join(certs, "privkey.pem"),
+    "-out",
+    join(certs, "fullchain.pem"),
+    "-config",
+    config,
+  ]);
+}
+
+/**
+ * The hand-edit the bring-your-own-certificate path documents.
+ *
+ * `install` writes the release's Caddyfile unchanged for `DNS_PROVIDER=none`,
+ * which still carries the `tls { dns … }` block — so Caddy would try to answer
+ * an ACME challenge with a module that was never compiled in. The README says
+ * to comment that block out and uncomment the `tls /certs/…` line; this is
+ * that, done in the test, so what runs afterwards is a deployment somebody
+ * could actually have.
+ */
+async function useSuppliedCertificate(dir: string): Promise<void> {
+  const path = join(dir, "Caddyfile");
+  const caddyfile = await readFile(path, "utf8");
+
+  const replaced = caddyfile.replace(
+    /\n\ttls \{[\s\S]*?\n\t\}\n/,
+    "\n\ttls /certs/fullchain.pem /certs/privkey.pem\n",
+  );
+
+  // Fail loudly rather than quietly testing a deployment with no TLS at all.
+  expect(replaced).not.toBe(caddyfile);
+  expect(replaced).toContain("tls /certs/fullchain.pem");
+
+  await writeFile(path, replaced);
+  await docker.composeOrThrow({ dir }, "up", "-d", "--force-recreate", "caddy");
+}
+
 describe("install", () => {
   it("brings up a working deployment and keeps its secrets on a re-run", async () => {
     dir = await mkdtemp(join(tmpdir(), "firetower-e2e-"));
+    await placeCertificates(dir);
 
-    const first = await execa("node", cli("--dir", dir, "--yes", "install"), {
+    // A high HTTPS port because 443 is a poor thing to demand of whatever
+    // machine this runs on. Port 80 is Caddy's redirect and is not
+    // configurable; Docker publishes it as root, so it needs none here.
+    const install = (...extra: string[]) =>
+      cli(
+        "--dir",
+        dir,
+        "--yes",
+        "install",
+        "--domain",
+        DOMAIN,
+        "--dns-provider",
+        "none",
+        "--https-bind",
+        BIND,
+        "--https-port",
+        "9443",
+        ...extra,
+      );
+
+    const first = await execa("node", install(), {
       reject: false,
       stdio: "inherit",
     });
@@ -78,11 +185,32 @@ describe("install", () => {
     });
     if (mode) expect(String(mode).trim()).toBe("600");
 
-    const doctor = await execa("node", cli("--dir", dir, "doctor"), { reject: false });
-    expect(doctor.exitCode).toBe(0);
+    await useSuppliedCertificate(dir);
+
+    // `doctor`, and specifically *which* of its checks fail.
+    //
+    // A bare exit code cannot be asserted here any more: every deployment has
+    // a domain now, and the one this installs is deliberately unresolvable —
+    // `.invalid` is reserved by RFC 2606 precisely so that it never resolves.
+    // So the DNS check fails, correctly, and it is the only thing allowed to.
+    // Asserting the set rather than the code is what keeps this a test of the
+    // deployment rather than of the test's own choice of domain.
+    const doctor = await execa("node", cli("--dir", dir, "--json", "doctor"), { reject: false });
+    const report = JSON.parse(doctor.stdout) as {
+      checks: { name: string; status: string }[];
+    };
+    const failing = report.checks.filter((c) => c.status === "fail").map((c) => c.name);
+
+    expect(failing).toEqual(["domain"]);
+
+    // The one this file is really about: the control plane is not on the
+    // network, and `doctor` agrees.
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ name: "exposure", status: "ok" }),
+    );
 
     // The whole point of this file.
-    const second = await execa("node", cli("--dir", dir, "--yes", "install"), {
+    const second = await execa("node", install(), {
       reject: false,
     });
 
@@ -105,40 +233,50 @@ describe("install", () => {
       expect(after?.HTTP_PORT).toBeUndefined();
     }
 
-    // HTTPS is Caddy's, and this shape has no Caddy.
-    expect(after?.HTTPS_PORT).toBeUndefined();
+    // HTTPS is Caddy's, and every shape has a Caddy now.
+    if (services.portsAreConfigurable(compose)) {
+      expect(after?.HTTPS_PORT).toBe("9443");
+    }
+
+    // The bind is written, and the advertised address is not: it is only
+    // written when it differs from the bind, and here it does not.
+    expect(after?.HTTPS_BIND).toBe(BIND);
+    expect(after?.HTTPS_ADVERTISE).toBeUndefined();
+    expect(after?.DOMAIN).toBe(DOMAIN);
+    expect(after?.FIRETOWER_PREVIEW_DOMAIN).toBe(DOMAIN);
 
     // Whatever the ports are, the URL that was printed agrees with them.
-    expect(after?.FIRETOWER_PUBLIC_URL).toBe("http://localhost:8080");
+    expect(after?.FIRETOWER_PUBLIC_URL).toBe(`https://${DOMAIN}:9443`);
 
     // Everything below asks the daemon what exists, rather than asking the
     // compose file what it meant to do. The compose file is the thing under
     // test.
     const running = await containers(dir);
 
-    // No proxy was created. It is behind the `tls` profile, and this shape has
-    // no certificate to terminate — the control plane serves its own
-    // interface, API and preview routing, so a proxy here would be a
-    // pass-through in front of a server that is already whole.
+    // The proxy was created, which is what `COMPOSE_PROFILES=tls` is for and
+    // what every install writes now. Its health is deliberately not asserted:
+    // the certificate placed above is not a real one, and the bring-your-own
+    // path also wants the Caddyfile's `tls` line uncommented by hand. What is
+    // under test here is what Compose created and where Docker published it.
     //
     // Asked of the containers and not of `ps --services`, which lists what the
     // compose file *defines* — profiles and all — and so says "caddy" whether
     // or not one was ever created.
     const names = running.map((container) => container.Service);
 
-    // The two positives are not decoration: they fail loudly if this ever
-    // reads an empty list or an output shape without `Service`, which is the
-    // way a `not.toContain` quietly stops testing anything.
     expect(names).toContain("firetower");
     expect(names).toContain("postgres");
-    expect(names).not.toContain("caddy");
+    expect(names).toContain("caddy");
 
     // **The assertion this file exists for.** Not what was written to `.env` —
-    // what Docker actually published. The bug this catches is an install that
-    // answers "only from this machine" and then puts the control plane, which
-    // holds every credential Firetower has, on the machine's public address. A
-    // host firewall would not have saved it either: Docker's DNAT rules are
-    // consulted before the host's INPUT chain.
+    // what Docker actually published. The bug it catches is an install that
+    // puts the control plane, which holds every credential Firetower has, on
+    // the machine's public address. A host firewall would not have saved it
+    // either: Docker's DNAT rules are consulted before the host's INPUT chain.
+    //
+    // Caddy is published too now, and on purpose — it is the front door. This
+    // bound it to loopback, so every publisher in this deployment should name
+    // that one address, whichever container it belongs to.
     if (services.bindIsConfigurable(compose)) {
       expect(after?.HTTP_BIND).toBe("127.0.0.1");
 
@@ -146,12 +284,11 @@ describe("install", () => {
         .flatMap((container) => container.Publishers ?? [])
         .filter((publisher) => publisher.URL);
 
-      // There has to be one, or the loop below proves nothing. The control
-      // plane publishes exactly one port and Postgres publishes none.
+      // There has to be one, or the loop below proves nothing.
       expect(published.length).toBeGreaterThan(0);
 
       for (const publisher of published) {
-        expect(publisher.URL).toBe("127.0.0.1");
+        expect(publisher.URL).toBe(BIND);
       }
     }
   });

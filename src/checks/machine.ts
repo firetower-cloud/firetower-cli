@@ -313,7 +313,7 @@ export const domainResolves: Check = {
   name: "domain",
   preflight: true,
   deployment: true,
-  async run({ domain, httpsBind }) {
+  async run({ domain, httpsBind, advertise }) {
     if (!domain) return ok("domain", "none — reached on loopback");
 
     const addresses = await addressesOf(domain);
@@ -332,7 +332,7 @@ export const domainResolves: Check = {
     const label = `probe-${randomBytes(3).toString("hex")}`;
     const wildcard = (await addressesOf(`${label}.${domain}`)).length > 0;
 
-    const where = await pointsHere(domain, addresses, httpsBind ?? null);
+    const where = await pointsHere(domain, addresses, expected(httpsBind, advertise));
 
     if (!wildcard) {
       return warn(
@@ -354,24 +354,49 @@ interface Pointing {
   remedy?: string;
 }
 
+/** Every interface — see `shape.ANY_INTERFACE`, kept here to avoid a cycle. */
+const ANY_INTERFACE = "0.0.0.0";
+
+/**
+ * The address the records are supposed to point at, which is not always the
+ * bind.
+ *
+ * `HTTPS_ADVERTISE` wins where it is set: on a machine behind NAT the records
+ * name an address on a router and Caddy listens on `0.0.0.0`, and comparing
+ * against the bind there produced the advice *"point both records at
+ * 0.0.0.0"*, which is not a thing anybody can do.
+ *
+ * `0.0.0.0` on its own means "any", so there is nothing specific to expect and
+ * the caller falls back to asking whether the name reaches this machine at
+ * all.
+ */
+function expected(httpsBind?: string | null, advertise?: string | null): string | null {
+  const advertised = advertise?.trim();
+  if (advertised) return advertised;
+
+  const bound = httpsBind?.trim();
+
+  return bound && bound !== ANY_INTERFACE ? bound : null;
+}
+
 async function pointsHere(
   domain: string,
   addresses: string[],
-  httpsBind: string | null,
+  wanted: string | null,
 ): Promise<Pointing> {
   // Asked first, and asked separately, because "an address on this machine" is
   // the wrong question once Caddy is held to one interface. A name resolving to
   // the VPC address beside a tailnet-bound Caddy passes that question and
   // reaches nothing.
-  if (httpsBind) {
-    if (addresses.includes(httpsBind)) {
-      return { here: true, detail: `${domain} → ${httpsBind}, where Caddy is listening` };
+  if (wanted) {
+    if (addresses.includes(wanted)) {
+      return { here: true, detail: `${domain} → ${wanted}, where Firetower is reached` };
     }
 
     return {
       here: false,
-      detail: `${domain} → ${addresses.join(", ")}, but Caddy is listening on ${httpsBind}`,
-      remedy: `point both records at ${httpsBind}, or change HTTPS_BIND to an address the name already resolves to`,
+      detail: `${domain} → ${addresses.join(", ")}, but Firetower is reached at ${wanted}`,
+      remedy: `point both records at ${wanted}, or change HTTPS_BIND to an address the name already resolves to`,
     };
   }
 

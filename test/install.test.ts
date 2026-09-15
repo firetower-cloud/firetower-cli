@@ -14,6 +14,7 @@ const domain: Reach = {
   dnsProvider: "cloudflare",
   dnsToken: "a-token",
   address: "100.64.0.1",
+  bind: "100.64.0.1",
 };
 const ownCertificate: Reach = {
   kind: "domain",
@@ -21,6 +22,7 @@ const ownCertificate: Reach = {
   dnsProvider: "none",
   dnsToken: "",
   address: "100.64.0.1",
+  bind: "100.64.0.1",
 };
 const proxy: Reach = { kind: "proxy", publicUrl: "https://firetower.example.com" };
 

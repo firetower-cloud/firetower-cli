@@ -4,7 +4,7 @@ Install, upgrade and inspect a [Firetower](https://usefiretower.com) deployment.
 
 ```sh
 npm i -g @firetower/cli
-firetower install
+firetower install --domain firetower.example.com
 ```
 
 ## What it does
@@ -24,55 +24,29 @@ paste.
 
 The first question, because the rest of the install follows from it:
 
-| Answer | Certificate | Control plane is published on | Proxy |
-| --- | --- | --- | --- |
-| Only from this machine | none | `127.0.0.1`, port yours to choose | none created |
-| Your own domain, over a mesh VPN | Let's Encrypt, over DNS-01 | `127.0.0.1`, behind Caddy | Caddy, on the address you name |
-| Behind a reverse proxy you already run | — | — | not supported yet |
+| Answer | Caddy listens on | DNS records point at |
+| --- | --- | --- |
+| Tailscale or another mesh VPN | the tailnet address, detected | the same address |
+| Advanced — an IP you type | what you type, or `0.0.0.0` | what you type |
 
-**Neither of the two puts Firetower on the internet.** That is deliberate rather
-than an omission. The control plane holds every git token, every agent
-credential and the root key, so whoever reaches it can erase the codebase of the
-company that installed it — which is a poor trade for the convenience of an
-automatic certificate.
+Both obtain a Let's Encrypt certificate over DNS-01, and neither needs this
+machine to be reachable from the internet to get one.
 
-### Only from this machine
+**There is no loopback install any more.** It was the default for a year, and
+what it needed — `firetower tunnel`, one forward per person — stopped being a
+reasonable thing to ask of a team. A deployment that already has that shape
+keeps upgrading; it is only the choice that is gone, and `firetower domain`
+moves one onto a name.
 
-The default, and the one to want. Nothing is published to the network:
+### Tailscale or another mesh VPN
 
-```sh
-firetower install
-```
-
-Installed on the machine you are sitting at, that is the end of it — open the
-URL. Installed on a server, the same deployment is reached over an ssh tunnel
-from wherever you actually sit, and this CLI will bring one up for you. It reads
-the port off the remote `.env` over the same connection it is about to forward:
-
-```sh
-firetower tunnel you@your-server
-firetower tunnel you@your-server --ssh-config   # the stanza, for the long term
-```
-
-Both sides use the same port number on purpose: it makes the address in your
-browser match the one Firetower prints in notifications, and a forward onto a
-port under 1024 would need root on *your* machine. That is also why `install`
-recommends 8080 rather than 80.
-
-### Your own domain, over a mesh VPN
-
-For when a tunnel each is not reasonable — several people, who need a name and
-not a forward. Caddy terminates TLS in front of Firetower with a certificate it
-**obtains and renews itself**, and the name never has to be reachable from the
-internet.
-
-The machine needs an address those people can already reach, and on a cloud VM
-that means a mesh VPN. Tailscale is the shortest route there:
+The one to want, and the one where this CLI can be sure of the answer: a
+tailnet address is always configured on an interface of this machine, so there
+is nothing to type and nothing to get wrong.
 
 ```sh
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
-tailscale ip -4          # 100.x.y.z — the address the records point at
 ```
 
 Disable key expiry for the machine in the Tailscale admin console while you are
@@ -86,27 +60,86 @@ firetower install --domain firetower.example.com \
   --dns-provider cloudflare --dns-token "$CLOUDFLARE_TOKEN"
 ```
 
-Interactively, `install` asks which of this machine's addresses people will
-reach it on, then for the provider and the token. It lists what the machine
-actually has, with anything that looks like a tailnet first — and it writes the
-answer to `HTTPS_BIND`, so **Caddy listens on that address and nowhere else**.
-Unattended, `--https-bind 100.69.206.104` says the same thing; without it, a
-machine with one candidate address uses it and a machine with several stops
-rather than guessing.
+Interactively it detects the address and confirms it. WireGuard, ZeroTier,
+Nebula and anything on a `tun`/`utun` device are recognised too — it is not
+Tailscale specifically, it is whatever looks like a network other people are
+also on.
 
-That last part is the difference between a private deployment and a public one.
-Left to itself Caddy binds `0.0.0.0`, which on a VM with a public IP is the
-front door open to the internet.
+### Advanced — an IP you type
 
-**Not on a cloud VM?** A machine already on the network its users are on — an
-on-prem box, or a VPC wired to the office over a site-to-site VPN or
-GlobalProtect — needs no tailnet. Its ordinary private address is the right
-answer, and it will be in the list.
+For a public address, a LAN, or a VPN whose interface nothing here recognises.
+You type the address people will reach it on, and **nothing is checked**:
 
-It works without exposing anything because of *how* the certificate is
-obtained. The usual ACME challenges have Let's Encrypt connect **to you**, and a
-machine Let's Encrypt can reach is a machine anyone can reach — with every git
-token, every agent credential and the root key behind it. DNS-01 proves control
+```sh
+firetower install --domain firetower.example.com \
+  --dns-provider cloudflare --dns-token "$TOKEN" \
+  --https-bind 34.79.12.180
+```
+
+Nothing is checked because nothing *can* be. On a Google Cloud VM the only
+address the guest holds is something like `10.128.0.2` — an RFC1918 address
+that the entire internet reaches through an external IP configured outside the
+VM. Calling that "private" would be a reassurance about a public deployment,
+and the reverse case exists too: a routable address behind a firewall that
+answers nobody. So the CLI states the consequence once, before the prompt, and
+believes the answer.
+
+The consequence, in full, is that on a publicly reachable address these are the
+front door:
+
+* **the control plane**, behind the login page — and it holds every git token,
+  every agent credential and the root key;
+* **every preview**, behind nothing at all. A preview hostname carries its own
+  signature and that signature is the only thing in front of it.
+
+A mesh VPN avoids both, which is why it is the recommendation rather than a
+default somebody can talk themselves out of.
+
+#### Behind NAT, a floating IP, or a load balancer
+
+Google Cloud, AWS and Azure each implement an external address as NAT outside
+the guest, so the machine is *reached* at an address it does not *have*. Caddy
+cannot listen on an address that is not there, so the two become separate
+facts:
+
+```sh
+firetower install --domain firetower.example.com \
+  --dns-provider cloudflare --dns-token "$TOKEN" \
+  --https-bind 0.0.0.0 --advertise 34.79.12.180
+```
+
+`--https-bind` is what Caddy listens on; `--advertise` is what the DNS records
+point at, and what `firetower doctor` checks them against. Interactively you
+are asked for the second one only when the first cannot be it — the prompt
+comes prefilled with `0.0.0.0`.
+
+Hetzner, DigitalOcean, Vultr, Linode and bare metal all configure the public
+address on the interface itself, so none of them need this.
+
+### Both of them need the two records
+
+```
+firetower.example.com     A   100.69.206.104
+*.firetower.example.com   A   100.69.206.104
+```
+
+Pointing at whichever address you settled on. The wildcard is not optional:
+previews are served at `<session>-<port>-<signature>.your-domain`, so a
+deployment with the apex record alone gets an interface that works and previews
+that do not resolve.
+
+On a mesh those records are public and resolve for everybody — they simply only
+*answer* for people on your tailnet.
+
+`install` prints them with your address filled in and waits for you to say they
+exist, and `firetower doctor` probes a random label under the domain
+afterwards, to tell a wildcard record apart from a single one that happens to
+exist.
+
+### Why DNS-01, and what comes with it
+
+The usual ACME challenges have Let's Encrypt connect **to you**, and a machine
+Let's Encrypt can reach is a machine anyone can reach. DNS-01 proves control
 the other way round: Caddy writes a TXT record through your provider's API and
 the authority reads it back out of DNS. Every connection is outbound.
 
@@ -115,50 +148,34 @@ twice over: previews are served on subdomains, and one wildcard keeps every
 preview hostname out of the public Certificate Transparency logs — where a
 hostname that *is* the credential for that preview does not belong.
 
+That is why a public deployment needs a DNS provider token exactly as much as a
+private one does. Going public does not simplify the install; the wildcard is
+what requires DNS-01, and previews are what require the wildcard.
+
 Four things go with it:
 
 1. **DNS_PROVIDER is compiled into Caddy.** Caddy resolves DNS providers as
    compiled-in modules, so the `tls` profile builds its own image. The first
    `up` pulls a Go toolchain and takes a few minutes rather than seconds, and
    needs a reachable Go module proxy at that moment. It is cached afterwards.
-2. Both names in DNS, pointing at the address you named — and the wildcard is
-   not optional:
-
-   ```
-   firetower.example.com     A   100.69.206.104
-   *.firetower.example.com   A   100.69.206.104
-   ```
-
-   Public records aimed at a private address. They resolve for everybody; they
-   only connect for people on that network. `install` prints these with your
-   address filled in and waits for you to say they exist, and `firetower
-   doctor` probes a random label under the domain afterwards, to tell a
-   wildcard record apart from a single one that happens to exist.
-
-   Neither record blocks the *certificate* — DNS-01 reads `_acme-challenge` and
-   nothing else, so one issues happily for a name with no A record at all. What
-   they block is anybody reaching it. What does block the certificate is the
-   zone being hosted at the provider whose token you gave: the API accepts the
-   write, and the record never appears.
-3. `install` writes `COMPOSE_PROFILES=tls`, which is what creates the Caddy
+2. `install` writes `COMPOSE_PROFILES=tls`, which is what creates the Caddy
    container at all. Without it there is no proxy.
-4. **Renewal is Caddy's**, unattended, at about two-thirds of the certificate's
+3. **Renewal is Caddy's**, unattended, at about two-thirds of the certificate's
    life. `firetower doctor` reports the expiry and says who is responsible for
    it.
-
-**Slow providers.** Some serve a record minutes after their API accepts it, and
-Caddy asks Let's Encrypt to validate within seconds — so the challenge fails
-with `No TXT record found` for a record that was written successfully, which
-reads like a bad token. GoDaddy is the measured case: a wildcard failed four
-times at 12-17 seconds and succeeded at 124. `install` writes
-`propagation_delay`, `propagation_timeout`, `dns_ttl` and `resolvers` into the
-`Caddyfile` for the providers known to need it, so there is nothing to do. For
-one that is not on that list, the file says which lines to add.
+4. **Slow providers.** Some serve a record minutes after their API accepts it,
+   and Caddy asks Let's Encrypt to validate within seconds — so the challenge
+   fails with `No TXT record found` for a record that was written successfully,
+   which reads like a bad token. GoDaddy is the measured case: a wildcard
+   failed four times at 12-17 seconds and succeeded at 124. `install` writes
+   `propagation_delay`, `propagation_timeout`, `dns_ttl` and `resolvers` into
+   the `Caddyfile` for the providers known to need it, so there is nothing to
+   do. For one that is not on that list, the file says which lines to add.
 
 **Every** module under [github.com/caddy-dns](https://github.com/caddy-dns)
 works — all ninety-odd of them — and the CLI knows their names. The interactive
-prompt lists the dozen that take a single API token and lets you type any of the
-rest; both the prompt and `--dns-provider` reject a name that is not one of
+prompt lists the dozen that take a single API token and lets you type any of
+the rest; both the prompt and `--dns-provider` reject a name that is not one of
 them, and suggest the closest:
 
 ```
@@ -174,13 +191,6 @@ Go build, after every other question has been answered.
 A full module path — `github.com/libdns/something` — is always accepted, for a
 provider that is not under caddy-dns or one added since your CLI was published.
 
-Route 53, Azure, Google Cloud, Namecheap, Porkbun, OVH and about forty others
-need several values and cannot be expressed by the Caddyfile's one-line form.
-Choose them anyway, so the right module is built in, and write the provider
-block by hand in the `Caddyfile`; the CLI warns when you pick one.
-`firetower upgrade` rewrites `firetower.yml` and never touches the `Caddyfile`,
-so the edit survives.
-
 One caveat worth stating plainly: the CLI validates provider **names**, not that
 a module currently compiles. A caddy-dns module can be held back by something it
 depends on — `caddy-dns/vercel` is, today — and that surfaces as a Go build
@@ -192,6 +202,14 @@ DNS_MODULE_REPLACE=github.com/libdns/vercel=github.com/libdns/vercel@v0.1.0
 ```
 
 Delete that line once the module's maintainer tags a release.
+
+Route 53, Azure, Google Cloud, Namecheap, Porkbun, OVH and about forty others
+need several values and cannot be expressed by the Caddyfile's one-line form.
+Choose them anyway, so the right module is built in, and write the provider
+block by hand in the `Caddyfile`; the CLI warns when you pick one.
+`firetower upgrade` rewrites `firetower.yml` and never touches the `Caddyfile`,
+so the edit survives.
+
 
 #### Bringing your own certificate
 
@@ -215,38 +233,38 @@ header, and routing those through a proxy you already run does not work — the
 deployment went on minting `*.localhost` previews behind it, which is an
 interface that works and previews that do not.
 
-Choosing it, or passing `--public-url`, now says so and writes nothing. A
-deployment that already has this shape keeps upgrading.
+It is not an answer the CLI offers any more, and `--public-url` is gone with it.
+A deployment that already has this shape keeps upgrading.
 
 If you want it: <https://github.com/firetower-cloud/firetower/issues>
 
 ### Changing your mind later
 
-`install` makes a deployment; it does not edit one. To put an existing
-deployment on a name — the usual case, a month after installing it on loopback
-because a second person now needs it — use `firetower domain`:
+`install` makes a deployment; it does not edit one. To move an existing one —
+onto a mesh address after opening it up, onto a new name, or onto a rotated
+token — use `firetower domain`:
 
 ```sh
-firetower domain firetower.example.com          # asks for the address, provider and token
+firetower domain firetower.example.com          # asks the same questions install does
 firetower domain firetower.example.com --dns-provider cloudflare --dns-token "$TOKEN"
-firetower domain --none                         # back to loopback again
+firetower domain --https-bind 100.69.206.104    # same name, different address
 ```
-
-With no arguments it asks the same questions `install` does.
 
 It changes nothing about the release: no images are pulled, no migrations run,
 no database is touched. It recomputes the values in `.env` that follow from the
 answer, shows you the diff — with the API token masked — and recreates the
-containers that have to read them. Going back removes the Caddy container
-rather than leaving it running on 443, which a plain `up -d` would.
+containers that have to read them.
+
+It is also how a deployment installed on loopback gets a name, which is the one
+way out of a shape that no longer installs.
 
 ### Older releases
 
 Choosing the ports needs a Firetower release that reads `HTTP_PORT`, and holding
-the control plane to loopback needs one that reads `HTTP_BIND`. Against an older
-one the CLI says so rather than writing a value nothing honours — and in the
-second case it says plainly that the release publishes on every interface,
-rather than promising a privacy it cannot deliver.
+the control plane to loopback behind Caddy needs one that reads `HTTP_BIND`.
+Against an older one the CLI says so rather than writing a value nothing
+honours — and in the second case it says plainly that the release publishes on
+every interface, rather than promising a privacy it cannot deliver.
 
 ## Requirements
 
@@ -257,8 +275,7 @@ installing onto. Node comes with npm, which you needed to install this.
 
 ```
 firetower install              install the control plane on this machine
-firetower domain [name]        change how it is reached — add or remove a name
-firetower tunnel <dest>        forward a loopback control plane to your machine
+firetower domain [name]        change the name or the address it is reached on
 firetower upgrade              upgrade it, then report which workers lag
 firetower status               version, health, hosts, worker drift
 firetower doctor               diagnose a deployment that isn't working
@@ -280,11 +297,14 @@ Global flags: `--dir <path>` (remembered after `install`), `--yes` for
 unattended runs, `--json` on any command that answers a question.
 
 `install` flags: `--domain`, `--dns-provider`, `--dns-token`, `--https-bind`,
-`--http-port`, `--https-port`, `--admin-username`, `--acme-email`.
+`--advertise`, `--http-port`, `--https-port`, `--admin-username`,
+`--acme-email`.
 
-`--https-bind` is the address Caddy listens on, and the address both DNS records
-point at — one fact, not two. Without it an unattended install takes the single
-candidate address, or stops and names the flag when there is more than one.
+`--https-bind` is the address Caddy listens on. `--advertise` is the address
+people reach it on, and is needed only where the machine cannot bind that one —
+behind NAT, a floating IP or a load balancer. Given neither, an unattended
+install takes the single mesh address, or stops and names the flag when there
+is no mesh address or more than one. It never guesses between several.
 
 `worker uninstall` (also `worker remove`) takes the container, both named
 volumes and the image — the worktrees, every uncommitted change in them, the
@@ -299,17 +319,19 @@ says why. The image stays too where another container was built from it.
 `worker reset` is the same removal — the image cache included, since a reset
 that kept it would be a reset with a qualifier — followed by an install.
 
-`tunnel` flags: `--local-port` when the remote port is taken on your machine,
-`--remote-port` to skip reading the remote `.env`, `--ssh-config` to print a
-stanza instead of connecting. It is the one command that runs somewhere other
-than the machine Firetower is installed on, so it needs no `--dir` and does not
-check the deployment's version.
+`firetower tunnel` is gone. It forwarded a control plane published on loopback,
+and that shape no longer installs; running it now says so rather than answering
+`unknown command`, for a release or two.
 
 ## Unattended
 
 ```sh
-firetower --yes install --domain firetower.example.com --admin-username admin
+firetower --yes install --domain firetower.example.com \
+  --dns-provider cloudflare --dns-token "$TOKEN" --admin-username admin
 ```
+
+`--domain` is required: a `--yes` with no domain used to mean the loopback
+shape, and now stops rather than quietly installing something else.
 
 Generates the administrator password and writes the root key to
 `firetower-root-key.txt` in the deployment directory, because there is nobody

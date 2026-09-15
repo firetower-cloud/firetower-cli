@@ -155,6 +155,7 @@ describe("modules that need a dependency substituted", () => {
         dnsProvider: "vercel",
         dnsToken: "tok",
         address: "100.64.0.1",
+        bind: "100.64.0.1",
       },
       { http: 8080, https: 443, configurable: true, bindable: true },
     );
@@ -170,6 +171,7 @@ describe("modules that need a dependency substituted", () => {
         dnsProvider: "godaddy",
         dnsToken: "key:secret",
         address: "100.64.0.1",
+        bind: "100.64.0.1",
       },
       { http: 8080, https: 443, configurable: true, bindable: true },
     );
@@ -246,6 +248,7 @@ describe("what gets written for a provider with no single token", () => {
       dnsProvider,
       dnsToken,
       address: "100.64.0.1",
+      bind: "100.64.0.1",
     });
 
   it("writes no DNS_API_TOKEN, because there is no token to write", () => {
