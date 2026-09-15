@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.5...v0.12.0) (2026-09-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **install:** `firetower install` requires --domain, `firetower tunnel` is gone, and --public-url and `firetower domain --none` are removed.
+
+### Features
+
+* **install:** two ways to be reached, and no loopback shape ([548990c](https://github.com/firetower-cloud/firetower-cli/commit/548990c6b15f10cc85b365e814aa1583f00e7b9e))
+
 ## [0.11.5](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.4...v0.11.5) (2026-09-09)
 
 
