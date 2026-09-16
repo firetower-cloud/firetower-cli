@@ -625,11 +625,8 @@ function finish(
   ui.step("You will be asked to replace that password when you sign in,");
   ui.step("and then to delete ADMIN_INITIAL_PASSWORD from .env.");
   ui.blank();
-  ui.step("Next: add a machine to run agents on. On that machine,");
-  ui.blank();
-  ui.dim("  npm i -g @firetower/cli && firetower worker install");
-  ui.blank();
-  ui.step("Then add it in Firetower under Compute → Add compute.");
+  ui.step("Next: add a machine to run agents on. Compute → Add a machine");
+  ui.step("shows the key to give it; Firetower installs the worker itself.");
   ui.blank();
   ui.dim("Docs: https://usefiretower.com/docs");
   ui.blank();

@@ -165,7 +165,7 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
   ui.dim(`  ${plan.next.FIRETOWER_PUBLIC_URL}`);
   ui.blank();
 
-  await reportWorkers(dir, control, after, fleetBefore, options);
+  await reportWorkers(dir, control, after, fleetBefore);
 }
 
 /**
@@ -559,7 +559,6 @@ async function reportWorkers(
   control: string,
   version: string | null,
   before: hosts.Host[] | null,
-  options: UpgradeOptions,
 ): Promise<void> {
   const fleet = (await hosts.list({ dir }, control)) ?? before;
 
@@ -569,9 +568,9 @@ async function reportWorkers(
       "",
       "This deployment cannot list them — that arrived in a later",
       "release — so check Compute in the interface for a version",
-      "warning, and on each machine that has one:",
+      "warning, and on each machine that has one press",
       "",
-      `  ${pc.bold("firetower worker upgrade")}`,
+      `  ${pc.bold("Reinstall the worker")}`,
     ]);
     return;
   }
@@ -589,7 +588,7 @@ async function reportWorkers(
 
   const rows = behind.map((host) => {
     const destination = hosts.sshDestination(host.compute) ?? "local";
-    return `  ${host.name.padEnd(12)} ${(host.workerVersion ?? "?").padEnd(8)} ${destination.padEnd(20)} ${hosts.containerName(host.compute)}`;
+    return `  ${host.name.padEnd(12)} ${(host.workerVersion ?? "?").padEnd(8)} ${destination}`;
   });
 
   const current = fleet.length - behind.length;
@@ -604,37 +603,12 @@ async function reportWorkers(
     ...rows,
     "",
     ...(current > 0 ? [`${current} already current, including localhost.`, ""] : []),
-    "On each machine:",
+    "Firetower reinstalls them itself: Updates in the interface, or",
+    "Compute → the machine → Reinstall the worker. By hand, on the machine:",
     "",
-    `  ${pc.bold("firetower worker upgrade")}`,
+    `  ${pc.bold("curl -fsSL https://usefiretower.com/worker.sh | sh")}`,
     "",
-    "Or, if the CLI isn't there:",
-    "",
-    "  npm i -g @firetower/cli && firetower worker upgrade",
-    "",
-    "Recreating a worker takes its tmux server with it, and every",
-    "session on that host goes too. `worker upgrade` refuses until the",
-    "host is drained — that is the step this replaces, and the one",
-    "people skip.",
+    "Replacing the binary does not stop a running agent; the next",
+    "session on that machine starts on the new one.",
   ]);
-
-  if (options.yes) return;
-
-  const show = await prompts.confirm({
-    message: "Show the ssh line for each machine",
-    initialValue: false,
-  });
-  if (prompts.isCancel(show) || !show) return;
-
-  ui.blank();
-  for (const host of behind) {
-    const destination = hosts.sshDestination(host.compute);
-    if (!destination) continue;
-
-    const container = hosts.containerName(host.compute);
-    ui.dim(
-      `ssh ${destination} 'npm i -g @firetower/cli && firetower worker upgrade --container ${container}'`,
-    );
-  }
-  ui.blank();
 }

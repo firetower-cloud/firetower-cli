@@ -284,12 +284,6 @@ firetower start | stop | restart
 firetower backup [--out DIR]   pg_dump plus the root key
 firetower uninstall            tear it down, asking separately about volumes
 
-firetower worker install       install a worker on THIS machine
-firetower worker upgrade       drain-aware worker upgrade
-firetower worker uninstall     remove it, and everything it holds
-firetower worker reset         remove it, then install a fresh one
-firetower worker status
-
 firetower --version            this CLI's version, and the deployed one
 ```
 
@@ -306,18 +300,11 @@ behind NAT, a floating IP or a load balancer. Given neither, an unattended
 install takes the single mesh address, or stops and names the flag when there
 is no mesh address or more than one. It never guesses between several.
 
-`worker uninstall` (also `worker remove`) takes the container, both named
-volumes and the image — the worktrees, every uncommitted change in them, the
-agents and the whole nested-Docker cache. It asks for the container's name
-typed out rather than a `y/N`, because there is nothing left afterwards to put
-any of it back from. `--dry-run` lists what would go and stops; `--keep-image`
-leaves the image, which is the one thing on that list a pull brings back.
-
-Two things it will not do. The `firetower` volume is shared by every worker on
-the machine, so where a second one mounts it the volume stays and the command
-says why. The image stays too where another container was built from it.
-`worker reset` is the same removal — the image cache included, since a reset
-that kept it would be a reset with a qualifier — followed by an install.
+Workers are not installed by this CLI. A worker is one binary on the machine
+that runs agents, put there by Firetower itself from Compute → Add a machine, or
+by hand with `curl -fsSL https://usefiretower.com/worker.sh | sh`. `firetower
+worker …` used to install a worker container here; those commands are gone with
+the container.
 
 `firetower tunnel` is gone. It forwarded a control plane published on loopback,
 and that shape no longer installs; running it now says so rather than answering
@@ -363,8 +350,7 @@ it and an end-to-end test that installs twice and asserts the key survived.
 
 ## Staying current
 
-`install`, `upgrade` and the `worker` commands ask two questions before they
-touch anything: whether npm has a newer CLI, and whether the current Firetower
+`install` and `upgrade` ask two questions before they touch anything: whether npm has a newer CLI, and whether the current Firetower
 release *requires* one.
 
 The second is the one with teeth. A release that changes what a deployment needs
