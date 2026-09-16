@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.13.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.12.0...v0.13.0) (2026-09-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **worker:** the worker is no longer installed by this CLI
+
+### Features
+
+* **worker:** the worker is no longer installed by this CLI ([785d15b](https://github.com/firetower-cloud/firetower-cli/commit/785d15b95f294db9ced4f1e64c64fb1c764b30dc))
+
 ## [0.12.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.11.5...v0.12.0) (2026-09-15)
 
 
