@@ -10,7 +10,6 @@ import { upgrade } from "./commands/upgrade.js";
 import { status } from "./commands/status.js";
 import { doctor } from "./commands/doctor.js";
 import * as lifecycle from "./commands/lifecycle.js";
-import * as worker from "./commands/worker/index.js";
 import { resolveProvider } from "./shape.js";
 import { ui, pc } from "./ui.js";
 
@@ -227,117 +226,6 @@ program
   .command("uninstall")
   .description("tear it down, asking separately about the volumes")
   .action(async () => lifecycle.uninstall({ dir: globals().dir, yes: globals().yes }));
-
-const workers = program
-  .command("worker")
-  .description("the worker, on the machine it runs on");
-
-workers
-  .command("install")
-  .description("install a worker on this machine")
-  .option("--container <name>", "what to call it", "firetower-worker")
-  .option(
-    "--agents <list>",
-    "agents to install, comma separated — asked for when omitted",
-  )
-  // A worker runs its sessions' own stacks — compose, a database — which needs
-  // a privileged container, and a privileged container can become root on this
-  // machine. That is the trade a worker already is; this is how to decline it.
-  .option("--no-docker", "do not run a Docker daemon inside the worker")
-  .action(async (options) => {
-    await checkVersion();
-    await worker.install({
-      container: options.container,
-      agents: options.agents,
-      docker: options.docker,
-      yes: globals().yes,
-    });
-  });
-
-workers
-  .command("agents")
-  .description("the agents this machine can run")
-  .option("--container <name>", "which container", "firetower-worker")
-  .option("--add <kind>", "install one: claude-code, codex")
-  .option("--remove <kind>", "remove one")
-  .action(async (options) =>
-    worker.agents({
-      container: options.container,
-      add: options.add,
-      remove: options.remove,
-    }),
-  );
-
-workers
-  .command("upgrade")
-  .description("upgrade this machine's worker, once its host is drained")
-  .option("--container <name>", "which container", "firetower-worker")
-  // Both halves, deliberately. A lone `--no-docker` would default the value to
-  // true, and `upgrade` has to tell "turn it on" from "leave it as it is" —
-  // declaring its opposite too is what leaves it undefined until somebody
-  // types one. Without that, the first upgrade of a worker installed with
-  // `--no-docker` would silently make it privileged.
-  .option("--docker", "run a Docker daemon inside the worker")
-  .option("--no-docker", "do not run a Docker daemon inside the worker")
-  .action(async (options) => {
-    await checkVersion();
-    await worker.upgrade({
-      container: options.container,
-      docker: options.docker,
-      yes: globals().yes,
-    });
-  });
-
-workers
-  .command("uninstall")
-  // What people type when they mean the same thing. `remove` reads as the
-  // opposite of `install` to some and `uninstall` to others, and neither of
-  // them should have to find out which one this CLI chose.
-  .alias("remove")
-  .description("remove this machine's worker and everything it holds")
-  .option("--container <name>", "which container", "firetower-worker")
-  // The image is shared with anything else on the machine built from it, and
-  // it is the one thing here that costs a pull rather than a loss.
-  .option("--keep-image", "leave the worker image on this machine")
-  .option("--dry-run", "list what would go, and stop")
-  .action(async (options) => {
-    await checkVersion();
-    await worker.uninstall({
-      container: options.container,
-      keepImage: options.keepImage,
-      dryRun: options.dryRun,
-      yes: globals().yes,
-    });
-  });
-
-workers
-  .command("reset")
-  .description("remove this machine's worker, then install a fresh one")
-  .option("--container <name>", "what to call it", "firetower-worker")
-  .option(
-    "--agents <list>",
-    "agents to install, comma separated — asked for when omitted",
-  )
-  .option("--no-docker", "do not run a Docker daemon inside the worker")
-  .option("--dry-run", "list what would go, and stop")
-  .action(async (options) => {
-    await checkVersion();
-    await worker.reset({
-      container: options.container,
-      agents: options.agents,
-      docker: options.docker,
-      dryRun: options.dryRun,
-      yes: globals().yes,
-    });
-  });
-
-workers
-  .command("status")
-  .description("what this machine's worker is running")
-  .option("--container <name>", "which container", "firetower-worker")
-  .action(async (options) =>
-    worker.status({ container: options.container, json: globals().json }),
-  );
 
 /**
  * `--version` answers two questions, because there are two versions and

@@ -164,7 +164,7 @@ export const workerDrift: Check = {
       : warn(
           "workers",
           `${behind.length} behind ${deployed}: ${behind.map((h) => h.name).join(", ")}`,
-          "firetower worker upgrade, on each machine",
+          "Updates in the interface, or Compute → the machine → Reinstall the worker",
         );
   },
 };

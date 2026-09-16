@@ -63,9 +63,3 @@ export function sshDestination(compute: Compute): string | null {
   return compute.port && compute.port !== 22 ? `${destination} -p ${compute.port}` : destination;
 }
 
-/** The container the worker runs in there, or the documented default. */
-export function containerName(compute: Compute): string {
-  if (compute.kind === "container") return compute.name;
-  if (compute.kind === "server" && compute.container) return compute.container;
-  return "firetower-worker";
-}
