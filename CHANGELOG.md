@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.13.0...v0.14.0) (2026-09-18)
+
+
+### Features
+
+* generate updater token in install and upgrade ([da9dee5](https://github.com/firetower-cloud/firetower-cli/commit/da9dee55b222ade63151b60d4c350738848da836))
+* generate updater token in install and upgrade ([d26ea3e](https://github.com/firetower-cloud/firetower-cli/commit/d26ea3e9860eb965290123099060c017b973c28a))
+
 ## [0.13.0](https://github.com/firetower-cloud/firetower-cli/compare/v0.12.0...v0.13.0) (2026-09-16)
 
 
