@@ -43,6 +43,11 @@ export interface UpgradeOptions {
  * So nothing is carried forward on trust. The shape is recomputed from the
  * compose file that will actually run, printed key by key, and written over the
  * old one. See `env.SEALED` for the values that are exempt from that, and why.
+ *
+ * One value is *added* rather than recomputed, and it is the only one:
+ * `FIRETOWER_UPDATER_TOKEN`. That is what repairs a deployment this CLI
+ * installed before the updater existed — see `reshape` below, and
+ * `env.withUpdaterToken` for why it is the one secret safe to invent.
  */
 export async function upgrade(options: UpgradeOptions): Promise<void> {
   const dir = await requireDeployment(options.dir);
@@ -224,7 +229,22 @@ async function reshape(
     held,
   );
 
-  const next = env.reshape(deployment.env, derive(reach, ports));
+  const reshaped = env.reshape(deployment.env, derive(reach, ports));
+
+  // The one value this command **adds** rather than recomputes, and the reason
+  // an upgrade repairs a deployment it did not install. Every install made
+  // before the updater shipped has no `FIRETOWER_UPDATER_TOKEN`, so the updater
+  // refuses every request and the Updates screen cannot upgrade the control
+  // plane — and nothing says so, because the compose file spells the variable
+  // `${FIRETOWER_UPDATER_TOKEN:-}` and Compose starts without complaint. See
+  // `env.withUpdaterToken` for why this is the only secret safe to backfill.
+  //
+  // It goes through `changes` like everything else, so it is a line in the plan
+  // block the operator confirms rather than an edit they find later.
+  const next = services.readsUpdaterToken(deployment.compose)
+    ? env.withUpdaterToken(reshaped)
+    : reshaped;
+
   const expected = services.createdServices(deployment.compose, services.activeProfiles(next));
 
   return {
@@ -321,6 +341,18 @@ function report(plan: Plan, composeChanged: boolean): void {
     ui.blank();
     for (const { key, before, after } of plan.changes) {
       ui.dim(`  ${key.padEnd(24)} ${env.display(key, before)} → ${env.display(key, after)}`);
+    }
+
+    // A variable the operator has never seen, arriving in a list of values
+    // being rewritten, reads as this command inventing something. Say what it
+    // is for instead — it is the line that makes the Updates screen able to
+    // upgrade this machine, which is not guessable from the name.
+    if (!plan.current.FIRETOWER_UPDATER_TOKEN && plan.next.FIRETOWER_UPDATER_TOKEN) {
+      ui.blank();
+      ui.dim("  FIRETOWER_UPDATER_TOKEN is new, and generated here. It is what the");
+      ui.dim("  control plane and the updater beside it recognise each other by;");
+      ui.dim("  without it the Updates screen can upgrade your workers but not");
+      ui.dim("  this machine. Nothing is sealed with it, so it is safe to replace.");
     }
   }
 

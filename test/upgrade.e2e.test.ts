@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as docker from "../src/docker.js";
 import * as env from "../src/env.js";
+import * as services from "../src/services.js";
 import * as upstream from "../src/upstream.js";
 
 /**
@@ -177,6 +178,47 @@ describe("upgrade, resumed after a failed one", () => {
     expect(after?.HTTP_BIND).toBe("127.0.0.1");
     expect(after?.FIRETOWER_PUBLIC_URL).toBe(`http://localhost:${after?.HTTP_PORT}`);
     expect(after?.FIRETOWER_ROOT_KEY).toBe(rootKey);
+
+    // **The repair.** The `.env` above is one this CLI wrote before the
+    // updater existed, so it has no `FIRETOWER_UPDATER_TOKEN` — and nothing
+    // ever told its operator, because the compose file spells the variable
+    // `${FIRETOWER_UPDATER_TOKEN:-}` and Compose starts without complaint. The
+    // symptom is only in the interface: Upgrade is refused by the updater, on
+    // the machine the button is meant to upgrade.
+    //
+    // This is the one value `upgrade` adds rather than recomputes, and it is
+    // what fixes every install made before the updater shipped without anybody
+    // having to read a changelog.
+    if (services.readsUpdaterToken(files.compose)) {
+      expect(after?.FIRETOWER_UPDATER_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+
+      // Once, not appended beside a line that was already there.
+      const text = await readFile(join(resumed, ".env"), "utf8");
+      expect(text.match(/^FIRETOWER_UPDATER_TOKEN=/gm)).toHaveLength(1);
+
+      // And it came from the upgrade rather than from the fixture, which is
+      // what makes the assertion above about this command at all.
+      expect(await readFile(join(resumed, ".env.backup"), "utf8")).not.toContain(
+        "FIRETOWER_UPDATER_TOKEN",
+      );
+
+      // Both containers, because the two have to agree: a token in `.env` that
+      // Compose did not interpolate looks identical from the file's side.
+      //
+      // `inspect` rather than `exec … env` — the updater image has no shell
+      // and no coreutils, so `exec updater env` fails with "executable file
+      // not found" and would read as an empty token.
+      for (const container of [`${project}-firetower-1`, `${project}-updater-1`]) {
+        const { stdout } = await execa("docker", [
+          "inspect",
+          container,
+          "--format",
+          "{{range .Config.Env}}{{println .}}{{end}}",
+        ]);
+
+        expect(stdout).toContain(`FIRETOWER_UPDATER_TOKEN=${after?.FIRETOWER_UPDATER_TOKEN}`);
+      }
+    }
 
     const response = await fetch(`http://127.0.0.1:${after?.HTTP_PORT}`, {
       signal: AbortSignal.timeout(10_000),

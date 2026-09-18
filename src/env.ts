@@ -42,6 +42,16 @@ export type Env = Record<string, string>;
  * moment somebody has signed in, so rewriting them breaks nothing — but a
  * password this CLI generated and printed once is not a value to silently
  * replace with a second one nobody saw.
+ *
+ * `FIRETOWER_UPDATER_TOKEN` is here for a third reason, and it is the weakest
+ * of the three: losing it loses nothing. It is not sealed over anything and no
+ * data directory baked it in — the control plane and the updater simply have to
+ * read the same line, and a fresh value works as well as the old one the moment
+ * both containers are recreated. What it must not do is *change under one of
+ * them*, and an operator who set one by hand has the config that is working.
+ * So it is filled in when absent — see `withUpdaterToken`, which is the only
+ * value in this file an upgrade adds rather than recomputes — and never
+ * replaced.
  */
 export const SEALED = [
   "FIRETOWER_ROOT_KEY",
@@ -50,6 +60,7 @@ export const SEALED = [
   "POSTGRES_DB",
   "ADMIN_USERNAME",
   "ADMIN_INITIAL_PASSWORD",
+  "FIRETOWER_UPDATER_TOKEN",
 ] as const;
 
 /**
@@ -118,8 +129,16 @@ export function reshape(existing: Env, owned: Env): Env {
  * That token does: adding a domain to an existing deployment writes one, and
  * printing it would put a credential that can edit DNS for the zone into a
  * terminal's scrollback and into any CI log capturing it.
+ *
+ * `FIRETOWER_UPDATER_TOKEN` breaks the "sealed values never appear in a diff"
+ * half of that, which is why it is listed too. It is sealed and it still shows
+ * up in one, because the interesting case is an upgrade that *adds* it to a
+ * deployment installed without one: `unset → …` is the line that repairs the
+ * Updates screen, and it is worth reading. The value behind it is what reaches
+ * a container holding this machine's Docker socket, so it is worth reading as
+ * eight dots.
  */
-export const REDACTED = ["DNS_API_TOKEN"] as const;
+export const REDACTED = ["DNS_API_TOKEN", "FIRETOWER_UPDATER_TOKEN"] as const;
 
 /** A value as it may be shown. */
 export function display(key: string, value?: string): string {
@@ -258,6 +277,51 @@ export function generateRootKey(): string {
   return randomBytes(32).toString("base64");
 }
 
+/**
+ * What the control plane and the updater beside it recognise each other by.
+ *
+ * Hex rather than base64 of any flavour, and 32 bytes of it, because
+ * `deploy/.env.example` tells whoever fills the file in by hand to run
+ *
+ *   openssl rand -hex 32
+ *
+ * and a value this CLI generates should not be distinguishable from one the
+ * docs produced. There is nothing to validate against afterwards — neither
+ * service checks the shape, they only compare — so matching the documented
+ * command is the whole of the specification.
+ */
+export function generateUpdaterToken(): string {
+  return randomBytes(32).toString("hex");
+}
+
+/**
+ * Fill in `FIRETOWER_UPDATER_TOKEN`, and only if it is not already answered.
+ *
+ * **This is the one value an upgrade adds rather than recomputes**, and it is
+ * deliberately not general. The other secrets in `SEALED` must not be
+ * backfilled: an absent `FIRETOWER_ROOT_KEY` means the server keeps its key on
+ * the volume, and writing one here would make every credential it has already
+ * sealed undecryptable; an absent `POSTGRES_PASSWORD` is a deployment that is
+ * already broken, and inventing one locks it out of its own data directory.
+ *
+ * This token is safe to invent for exactly the reasons those are not. Nothing
+ * is encrypted with it, nothing baked it in, and neither container stores it —
+ * the two services just have to read the same line. So a deployment that never
+ * had one can be given one, and that is worth doing: every install made before
+ * the updater shipped has an Updates screen that cannot upgrade the control
+ * plane, and the operator has no way to know why. Compose will not tell them
+ * either, because the compose file spells it `${FIRETOWER_UPDATER_TOKEN:-}` and
+ * starts happily without it.
+ *
+ * Empty counts as absent, the same way it does in `merge`: that is how
+ * `deploy/.env.example` ships the line, and it is what the updater refuses on.
+ */
+export function withUpdaterToken(values: Env): Env {
+  if (values.FIRETOWER_UPDATER_TOKEN) return values;
+
+  return { ...values, FIRETOWER_UPDATER_TOKEN: generateUpdaterToken() };
+}
+
 /** What the server will accept. Checked here so a bad key fails before `up`. */
 export function looksLikeARootKey(value: string): boolean {
   if (value.length !== 44 || !value.endsWith("=")) return false;
@@ -302,6 +366,7 @@ const EXPLAINED = [
   "FIRETOWER_PREVIEW_DOMAIN",
   "POSTGRES_PASSWORD",
   "FIRETOWER_ROOT_KEY",
+  "FIRETOWER_UPDATER_TOKEN",
   "ADMIN_USERNAME",
   "ADMIN_INITIAL_PASSWORD",
 ];
@@ -404,6 +469,21 @@ ${line("POSTGRES_PASSWORD")}
 # point: a stolen database opens nothing on its own. Losing this key means
 # adding every credential again.
 ${line("FIRETOWER_ROOT_KEY")}
+# What the control plane and the updater beside it recognise each other by,
+# hex, 32 bytes. Both services read this one line.
+#
+# The updater is the container that recreates the control plane when you press
+# Upgrade on the Updates screen, and it holds this machine's Docker socket — so
+# this is the only thing between "can reach the compose network" and "can
+# recreate containers". Leave it empty and the updater refuses every request:
+# the Updates screen still upgrades your workers, and says the control plane
+# has to be done from here.
+#
+# Nothing is sealed with it and neither container stores it, so unlike the key
+# above this one is safe to replace. Put a new one here — \`openssl rand -hex
+# 32\` — then \`firetower start\`, which recreates both services against it.
+# \`restart\` will not do: it reuses the environment already in the containers.
+${line("FIRETOWER_UPDATER_TOKEN")}
 # The administrator, created before anything listens. Once somebody has signed
 # in and chosen a password these are ignored — never re-applied, never compared.
 #

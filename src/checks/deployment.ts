@@ -193,6 +193,54 @@ export const upToDate: Check = {
 };
 
 /**
+ * Whether the Updates screen can upgrade this machine, or only its workers.
+ *
+ * Its own check rather than another branch of `.env` above, because that one
+ * returns on the first thing it finds and this must not queue behind an
+ * `ADMIN_INITIAL_PASSWORD` somebody has not got round to deleting.
+ *
+ * A warning, never a failure. The deployment runs perfectly without the token —
+ * the compose file spells it `${FIRETOWER_UPDATER_TOKEN:-}`, so Compose starts
+ * without complaint and every container is healthy. What does not work is the
+ * one button people go looking for, and the updater's refusal is only visible
+ * in a log nobody reads. So this is the place it gets said.
+ *
+ * The remedy names `start` and not `restart`, and that is the detail worth
+ * having right. `docker compose restart` restarts the container it already has,
+ * with the environment already baked into it — a hand-edited `.env` is not read
+ * at all, and somebody following this would add the line, restart, watch the
+ * Updates screen fail in exactly the same way, and conclude the token was not
+ * the problem. `up -d` notices the changed configuration and recreates both
+ * services, which is what `firetower start` runs.
+ */
+export const updater: Check = {
+  name: "updater",
+  preflight: false,
+  deployment: true,
+  async run({ dir }) {
+    if (!dir) return fail("updater", "no deployment found");
+
+    const deployment = await openDeployment(dir);
+
+    // A release older than the updater has no container to be missing a token
+    // for, and nagging about a variable nothing reads would be noise.
+    if (!services.readsUpdaterToken(deployment.compose)) {
+      return ok("updater", "not in this release — upgrade from the command line");
+    }
+
+    if (deployment.env.FIRETOWER_UPDATER_TOKEN) {
+      return ok("updater", "token set, shared with the control plane");
+    }
+
+    return warn(
+      "updater",
+      "FIRETOWER_UPDATER_TOKEN is empty",
+      "the updater refuses every request without it, so the Updates screen upgrades workers only. `firetower upgrade` adds one. By hand: put FIRETOWER_UPDATER_TOKEN=$(openssl rand -hex 32) in .env, then `firetower start` — `restart` reuses the old environment and will not pick it up.",
+    );
+  },
+};
+
+/**
  * Whether the control plane is on the network.
  *
  * The most expensive mistake this product can make. The control plane holds
@@ -494,5 +542,8 @@ export const deploymentChecks: Check[] = [
   wildcardServed,
   trustedProxy,
   upToDate,
+  // Beside `upToDate`, which says a release is out, because this is the answer
+  // to "and can I take it from the interface?".
+  updater,
   workerDrift,
 ];

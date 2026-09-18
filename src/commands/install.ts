@@ -135,12 +135,26 @@ export async function install(options: InstallOptions): Promise<void> {
 
   ui.blank();
   ui.step("Generating secrets");
+
+  // Only for a release that has an updater to recognise. Writing it against an
+  // older compose file would put a credential in `.env` for a container that
+  // is never created — the same objection `derive` makes about `HTTPS_PORT`.
+  const updaterToken = services.readsUpdaterToken(files.compose)
+    ? env.generateUpdaterToken()
+    : null;
+
   const secrets = {
     POSTGRES_PASSWORD: env.generatePassword(),
     FIRETOWER_ROOT_KEY: env.generateRootKey(),
+    ...(updaterToken ? { FIRETOWER_UPDATER_TOKEN: updaterToken } : {}),
   };
   ui.ok("database password");
   ui.ok("root key", "32 bytes, base64");
+  // Said out loud rather than generated quietly, because its absence is what
+  // this line exists to fix: every install made before the updater shipped has
+  // an Updates screen that cannot upgrade the control plane, and Compose never
+  // mentions it — the variable has a default of empty, so nothing fails.
+  if (updaterToken) ui.ok("updater token", "32 bytes, hex — shared with the updater");
 
   const values: env.Env = {
     // The shape — reach, ports, profiles, the URL — from the one place that

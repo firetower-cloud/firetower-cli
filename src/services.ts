@@ -205,6 +205,35 @@ export function obtainsCertificates(compose: string): boolean {
 }
 
 /**
+ * Whether anything in this compose file reads `FIRETOWER_UPDATER_TOKEN`.
+ *
+ * The same shape of question as `obtainsCertificates`, and asked so that the
+ * token is generated for the releases that have an updater beside the control
+ * plane and not for the ones that do not. A release older than the updater has
+ * no service that reads it, and the line in such a deployment's `.env` would be
+ * a credential sitting in a file for a container that is never created.
+ *
+ * Note that it is **not** in `requiredVariables`: the compose file spells it
+ * `${FIRETOWER_UPDATER_TOKEN:-}`, so Compose starts perfectly happily without
+ * one and the updater is the thing that refuses. That is exactly why this
+ * question has to be asked here — nothing downstream of Compose ever notices.
+ */
+export function readsUpdaterToken(compose: string): boolean {
+  let services: Record<string, ComposeService>;
+  try {
+    services = parseServices(compose);
+  } catch {
+    // Unreadable is not evidence either way, and the honest answer is the one
+    // that does not write a credential nothing has been shown to read.
+    return false;
+  }
+
+  return Object.values(services).some((service) =>
+    JSON.stringify(service).includes("${FIRETOWER_UPDATER_TOKEN"),
+  );
+}
+
+/**
  * `${VAR:?message}` — the variables Compose refuses to start without.
  *
  * Read so that a release which adds one produces "this needs FIRETOWER_X;

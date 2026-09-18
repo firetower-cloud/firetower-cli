@@ -348,6 +348,21 @@ into the data directory at initdb.
 `src/env.ts` reads first and fills only what is absent. There are unit tests for
 it and an end-to-end test that installs twice and asserts the key survived.
 
+**One value an `upgrade` adds rather than carries**, and it is the only one:
+`FIRETOWER_UPDATER_TOKEN`. It is what the control plane and the updater beside
+it recognise each other by, and a deployment installed before the updater
+shipped has no line for it — so the updater refuses every request and the
+Updates screen can upgrade the workers but not the machine it is running on.
+Nothing said so, because the compose file spells the variable
+`${FIRETOWER_UPDATER_TOKEN:-}` and Compose starts without complaint.
+
+So `upgrade` generates one when the key is absent or empty, shows it in the plan
+block as `unset → ••••••••`, and never touches a value that is already there.
+It is the one secret that is safe to invent: nothing is sealed with it and no
+data directory baked it in, so unlike the two above a fresh value costs nothing
+once both containers are recreated. `firetower doctor` reports a deployment that
+is still missing it.
+
 ## Staying current
 
 `install` and `upgrade` ask two questions before they touch anything: whether npm has a newer CLI, and whether the current Firetower
