@@ -29,7 +29,8 @@ const CLI = join(import.meta.dirname, "..", "dist", "cli.js");
  * `down -v` below would remove the real deployment's database volume.
  * COMPOSE_PROJECT_NAME outranks the name in the file.
  */
-process.env.COMPOSE_PROJECT_NAME = "firetower-install-e2e";
+const PROJECT = "firetower-install-e2e";
+process.env.COMPOSE_PROJECT_NAME = PROJECT;
 
 /**
  * The CLI under test, invoked without the registry check.
@@ -178,6 +179,46 @@ describe("install", () => {
     expect(before?.FIRETOWER_ROOT_KEY).toBeTruthy();
     expect(env.looksLikeARootKey(before!.FIRETOWER_ROOT_KEY!)).toBe(true);
 
+    // The token the updater beside the control plane recognises it by.
+    //
+    // Generated here rather than left for the operator, and that is the whole
+    // point: `deploy/firetower.yml` spells the variable
+    // `${FIRETOWER_UPDATER_TOKEN:-}`, so an install without one starts
+    // perfectly, every container is healthy, and the only thing that does not
+    // work is the Upgrade button — which refuses in a log nobody reads.
+    //
+    // Skipped against a release from before the updater existed, where writing
+    // it would be a credential in `.env` for a container that is never made.
+    // The file it wrote, which is the one the release publishes and the thing
+    // actually under test. Read once, here, because the assertions below and
+    // the port ones further down all ask it what this release supports.
+    const compose = await readFile(join(dir, "firetower.yml"), "utf8");
+    expect(compose).toContain("ghcr.io/firetower-cloud/firetower");
+
+    if (services.readsUpdaterToken(compose)) {
+      // `openssl rand -hex 32`, which is what `deploy/.env.example` tells
+      // somebody filling the file in by hand to run.
+      expect(before?.FIRETOWER_UPDATER_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+
+      // And it reached both containers, which is the assertion that matters:
+      // the two have to agree, and a value in `.env` that Compose did not
+      // interpolate would look identical from the file's side.
+      //
+      // Read with `inspect` rather than `exec … env`, because the updater
+      // image has no shell and no coreutils — `exec updater env` fails with
+      // "executable file not found" and would read as an empty token.
+      for (const container of [`${PROJECT}-firetower-1`, `${PROJECT}-updater-1`]) {
+        const { stdout } = await execa("docker", [
+          "inspect",
+          container,
+          "--format",
+          "{{range .Config.Env}}{{println .}}{{end}}",
+        ]);
+
+        expect(stdout).toContain(`FIRETOWER_UPDATER_TOKEN=${before?.FIRETOWER_UPDATER_TOKEN}`);
+      }
+    }
+
     // `.env` holds every secret this deployment has. Nobody else on the
     // machine gets to read it.
     const { stdout: mode } = await execa("stat", ["-c", "%a", join(dir, ".env")], {
@@ -218,10 +259,6 @@ describe("install", () => {
     expect(after?.FIRETOWER_ROOT_KEY).toBe(before?.FIRETOWER_ROOT_KEY);
     expect(after?.POSTGRES_PASSWORD).toBe(before?.POSTGRES_PASSWORD);
     expect(second.exitCode).not.toBe(0); // it should refuse, not proceed
-
-    // And the compose file it wrote is the one the release publishes.
-    const compose = await readFile(join(dir, "firetower.yml"), "utf8");
-    expect(compose).toContain("ghcr.io/firetower-cloud/firetower");
 
     // The ports are written exactly when the release can honour them, and
     // never otherwise. A `.env` naming a port the compose file does not read

@@ -194,3 +194,85 @@ describe("display", () => {
     expect(env.display("DNS_PROVIDER", "cloudflare")).toBe("cloudflare");
   });
 });
+
+describe("the updater token", () => {
+  it("is what `openssl rand -hex 32` produces", () => {
+    // `deploy/.env.example` tells whoever fills the file in by hand to run
+    // exactly that, and a value this CLI generates should not be
+    // distinguishable from one those instructions produced. Neither service
+    // validates the shape — they only compare — so matching the documented
+    // command is the whole of the specification.
+    for (let i = 0; i < 200; i++) {
+      const token = env.generateUpdaterToken();
+      expect(token).toMatch(/^[0-9a-f]{64}$/);
+      expect(Buffer.from(token, "hex")).toHaveLength(32);
+    }
+  });
+
+  it("does not repeat itself", () => {
+    const tokens = new Set(Array.from({ length: 100 }, () => env.generateUpdaterToken()));
+    expect(tokens.size).toBe(100);
+  });
+
+  it("is added to a deployment that has never had one", () => {
+    // The repair, and the reason this exists. Every install made before the
+    // updater shipped has no token, so the updater refuses every request and
+    // the Updates screen cannot upgrade the control plane — and Compose never
+    // says so, because the variable's default is empty.
+    const next = env.withUpdaterToken({ DOMAIN: "example.com" });
+
+    expect(next.FIRETOWER_UPDATER_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+    expect(next.DOMAIN).toBe("example.com");
+  });
+
+  it("treats an empty value as absent, because that is how .env.example ships it", () => {
+    const next = env.withUpdaterToken({ FIRETOWER_UPDATER_TOKEN: "" });
+    expect(next.FIRETOWER_UPDATER_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("never replaces one that is already set", () => {
+    // Both services read this one line, and an operator who set one by hand
+    // has the config that is working. Rotating it underneath them would take
+    // the Updates screen down rather than repair it.
+    const existing = { FIRETOWER_UPDATER_TOKEN: "a-token-somebody-chose" };
+
+    expect(env.withUpdaterToken(existing).FIRETOWER_UPDATER_TOKEN).toBe("a-token-somebody-chose");
+    expect(env.withUpdaterToken(existing)).toBe(existing);
+  });
+
+  it("is sealed, so re-deriving the shape cannot rotate it", () => {
+    const existing = { FIRETOWER_UPDATER_TOKEN: "the-original", HTTP_PORT: "9000" };
+    const next = env.reshape(existing, {
+      FIRETOWER_UPDATER_TOKEN: "a-second-one",
+      HTTP_PORT: "8080",
+    });
+
+    expect(next.FIRETOWER_UPDATER_TOKEN).toBe("the-original");
+    expect(next.HTTP_PORT).toBe("8080");
+  });
+
+  it("survives a round trip through the file format", () => {
+    const token = env.generateUpdaterToken();
+    const values = env.parse(env.format({ FIRETOWER_UPDATER_TOKEN: token }));
+
+    expect(values.FIRETOWER_UPDATER_TOKEN).toBe(token);
+  });
+
+  it("is written with the comment that explains it, not carried as an unknown", () => {
+    // In `EXPLAINED`, so it lands beside the root key with the paragraph about
+    // what it is for — rather than at the bottom of the file under "Kept from
+    // the file that was already here", where it reads as something the
+    // operator left behind.
+    const text = env.format({ FIRETOWER_UPDATER_TOKEN: "a-token" });
+
+    expect(text).not.toContain("Kept from the file");
+    expect(text).toContain("Upgrade on the Updates screen");
+  });
+
+  it("is never printed in the plan block", () => {
+    // It reaches a container holding this machine's Docker socket. The
+    // interesting part of the change is that it arrived at all.
+    expect(env.display("FIRETOWER_UPDATER_TOKEN", "deadbeef".repeat(8))).toBe("••••••••");
+    expect(env.display("FIRETOWER_UPDATER_TOKEN", undefined)).toBe("unset");
+  });
+});

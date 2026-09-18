@@ -136,6 +136,36 @@ services:
   });
 });
 
+describe("readsUpdaterToken", () => {
+  it("is true for the compose file this CLI writes", () => {
+    expect(services.readsUpdaterToken(COMPOSE)).toBe(true);
+  });
+
+  it("is false for a release from before the updater existed", () => {
+    // The objection it answers: writing FIRETOWER_UPDATER_TOKEN against such a
+    // file puts a credential in `.env` for a container that is never created.
+    const older = COMPOSE.split("\n")
+      .filter((line) => !line.includes("FIRETOWER_UPDATER_TOKEN"))
+      .join("\n");
+
+    expect(services.readsUpdaterToken(older)).toBe(false);
+  });
+
+  it("does not write a credential for a file it cannot read", () => {
+    expect(services.readsUpdaterToken("services: [this is not a mapping")).toBe(false);
+  });
+
+  it("is not something Compose itself would ever ask for", () => {
+    // The whole reason the question has to be asked separately. The variable is
+    // spelled `${FIRETOWER_UPDATER_TOKEN:-}`, so Compose starts perfectly
+    // happily without one and `missingVariables` — which is how every other
+    // absent variable gets reported — has nothing to say about it. The updater
+    // is the thing that refuses, in a log nobody reads.
+    expect(services.requiredVariables(COMPOSE)).not.toContain("FIRETOWER_UPDATER_TOKEN");
+    expect(missingVariables(COMPOSE, {})).not.toContain("FIRETOWER_UPDATER_TOKEN");
+  });
+});
+
 describe("dormantRequiredVariables", () => {
   it("finds what Compose demands for a service it will not create", () => {
     // The failure this exists for. Profiles decide which containers are
